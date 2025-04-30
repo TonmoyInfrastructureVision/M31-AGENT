@@ -1,0 +1,201 @@
+{
+  "name": "m31-agent",
+  "displayName": "M31-Agent",
+  "description": "AI-powered autonomous coding assistant that integrates with OpenRouter AI's API",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages",
+    "Machine Learning",
+    "Education"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "m31-agent.showChatPanel",
+        "title": "M31-Agent: Show Chat Panel"
+      },
+      {
+        "command": "m31-agent.generateCode",
+        "title": "M31-Agent: Generate Code"
+      },
+      {
+        "command": "m31-agent.explainCode",
+        "title": "M31-Agent: Explain Selected Code"
+      },
+      {
+        "command": "m31-agent.runCommand",
+        "title": "M31-Agent: Run Terminal Command"
+      },
+      {
+        "command": "m31-agent.navigateCodebase",
+        "title": "M31-Agent: Navigate Codebase"
+      },
+      {
+        "command": "m31-agent.configureSettings",
+        "title": "M31-Agent: Configure Settings"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "m31-agent",
+          "title": "M31-Agent",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "m31-agent": [
+        {
+          "id": "m31AgentChatView",
+          "name": "Chat",
+          "icon": "resources/chat.svg"
+        },
+        {
+          "id": "m31AgentHistoryView",
+          "name": "History",
+          "icon": "resources/history.svg"
+        },
+        {
+          "id": "m31AgentSettingsView",
+          "name": "Settings",
+          "icon": "resources/settings.svg"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "m31-agent.generateCode",
+          "when": "editorTextFocus",
+          "group": "m31-agent"
+        },
+        {
+          "command": "m31-agent.explainCode",
+          "when": "editorHasSelection",
+          "group": "m31-agent"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "m31-agent.showChatPanel",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "m31-agent.showChatPanel"
+        },
+        {
+          "command": "m31-agent.generateCode"
+        },
+        {
+          "command": "m31-agent.explainCode",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "m31-agent.runCommand"
+        },
+        {
+          "command": "m31-agent.navigateCodebase"
+        },
+        {
+          "command": "m31-agent.configureSettings"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "M31-Agent",
+      "properties": {
+        "m31-agent.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenRouter API key (recommended to use VS Code secrets instead)"
+        },
+        "m31-agent.modelId": {
+          "type": "string",
+          "default": "openai/gpt-4o",
+          "description": "AI model ID to use for code generation and assistance"
+        },
+        "m31-agent.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": ["debug", "info", "warning", "error", "none"],
+          "description": "Log level for the extension"
+        },
+        "m31-agent.enableTelemetry": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable telemetry to improve the extension"
+        },
+        "m31-agent.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum number of tokens to use in AI requests"
+        },
+        "m31-agent.temperature": {
+          "type": "number",
+          "default": 0.2,
+          "description": "Temperature for AI model responses (0-1)"
+        },
+        "m31-agent.requireConfirmation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require confirmation before executing file operations or terminal commands"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "clean": "rimraf out dist",
+    "prepare": "npm run compile"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "openai": "^4.20.1",
+    "uuid": "^9.0.1",
+    "@vscode/codicons": "^0.0.33",
+    "@vscode/webview-ui-toolkit": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.3",
+    "@types/node": "^18.18.8",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "@types/uuid": "^9.0.7",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.9.1",
+    "@typescript-eslint/parser": "^6.9.1",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.52.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "rimraf": "^5.0.0",
+    "ts-loader": "^9.5.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2",
+    "vscode-test": "^2.3.6",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  }
+}
