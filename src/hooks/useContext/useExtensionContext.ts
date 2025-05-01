@@ -76,4 +76,134 @@ export function useExtensionContext(
         subscriptions,
         isInitialized
     };
+}
+
+let globalExtensionContext: ExtensionContext | undefined;
+
+export function initializeExtensionContext(context: ExtensionContext): void {
+    globalExtensionContext = context;
+}
+
+export function useGlobalState<T>(key: string, defaultValue?: T): {
+    value: T | undefined;
+    setValue: (value: T) => Thenable<void>;
+    clearValue: () => Thenable<void>;
+} {
+    const context = useExtensionContext();
+    
+    if (!context || !context.vscodeContext) {
+        throw new Error('Extension context is not properly initialized');
+    }
+    
+    const extensionContext = context.vscodeContext;
+    const logging = context.loggingService;
+
+    const value = extensionContext.globalState.get<T>(key) ?? defaultValue;
+
+    const setValue = (newValue: T): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Setting global state: ${key}`);
+        }
+        return extensionContext.globalState.update(key, newValue);
+    };
+
+    const clearValue = (): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Clearing global state: ${key}`);
+        }
+        return extensionContext.globalState.update(key, undefined);
+    };
+
+    return {
+        value,
+        setValue,
+        clearValue
+    };
+}
+
+export function useWorkspaceState<T>(key: string, defaultValue?: T): {
+    value: T | undefined;
+    setValue: (value: T) => Thenable<void>;
+    clearValue: () => Thenable<void>;
+} {
+    const context = useExtensionContext();
+    
+    if (!context || !context.vscodeContext) {
+        throw new Error('Extension context is not properly initialized');
+    }
+    
+    const extensionContext = context.vscodeContext;
+    const logging = context.loggingService;
+
+    const value = extensionContext.workspaceState.get<T>(key) ?? defaultValue;
+
+    const setValue = (newValue: T): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Setting workspace state: ${key}`);
+        }
+        return extensionContext.workspaceState.update(key, newValue);
+    };
+
+    const clearValue = (): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Clearing workspace state: ${key}`);
+        }
+        return extensionContext.workspaceState.update(key, undefined);
+    };
+
+    return {
+        value,
+        setValue,
+        clearValue
+    };
+}
+
+export function useExtensionPath(relativePath: string): string {
+    const context = useExtensionContext();
+    
+    if (!context || !context.vscodeContext) {
+        throw new Error('Extension context is not properly initialized');
+    }
+    
+    const extensionPath = context.vscodeContext.extensionPath;
+    return vscode.Uri.joinPath(vscode.Uri.file(extensionPath), relativePath).fsPath;
+}
+
+export function useSecretStorage(): {
+    getSecret: (key: string) => Thenable<string | undefined>;
+    storeSecret: (key: string, value: string) => Thenable<void>;
+    deleteSecret: (key: string) => Thenable<void>;
+} {
+    const context = useExtensionContext();
+    
+    if (!context || !context.vscodeContext) {
+        throw new Error('Extension context is not properly initialized');
+    }
+    
+    const secretStorage = context.vscodeContext.secrets;
+    const logging = context.loggingService;
+
+    const getSecret = (key: string): Thenable<string | undefined> => {
+        return secretStorage.get(key);
+    };
+
+    const storeSecret = (key: string, value: string): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Storing secret: ${key}`);
+        }
+        return secretStorage.store(key, value);
+    };
+
+    const deleteSecret = (key: string): Thenable<void> => {
+        if (logging) {
+            logging.debug(`Deleting secret: ${key}`);
+        }
+        return secretStorage.delete(key);
+    };
+
+    return {
+        getSecret,
+        storeSecret,
+        deleteSecret
+    };
 } 

@@ -1,133 +1,247 @@
 import * as vscode from 'vscode';
 import { ExtensionContext } from '../../models/context/extensionContext';
+import { LoggingService } from '../../utils/logging/loggingService';
+import { TelemetryService } from '../../services/telemetry/telemetryService';
 import { TerminalService } from '../../services/terminal/terminalService';
-import { registerCommand } from '../commandRegistry';
 
-export function registerCodeExecutionCommands(context: ExtensionContext): void {
-    context.loggingService.debug('Registering code execution commands');
+export class CodeExecutionCommands {
+    private readonly _extensionContext: ExtensionContext;
+    private readonly _logging: LoggingService;
+    private readonly _telemetry: TelemetryService;
+    private readonly _terminalService: TerminalService;
+    private readonly _disposables: vscode.Disposable[] = [];
 
-    // Ensure terminal service is initialized
-    const terminalService = TerminalService.initialize(context);
+    constructor(
+        extensionContext: ExtensionContext,
+        terminalService: TerminalService
+    ) {
+        this._extensionContext = extensionContext;
+        this._logging = extensionContext.loggingService;
+        this._telemetry = extensionContext.telemetryService;
+        this._terminalService = terminalService;
 
-    registerCommand(
-        context,
-        'm31-agent.executeInTerminal',
-        async (code?: string) => {
-            if (!code) {
-                const editor = vscode.window.activeTextEditor;
-                if (!editor) {
-                    throw new Error('No active editor or code provided to execute');
-                }
+        this.registerCommands();
+    }
 
-                if (editor.selection.isEmpty) {
-                    code = editor.document.getText();
-                } else {
-                    code = editor.document.getText(editor.selection);
-                }
-            }
+    private registerCommands(): void {
+        this._disposables.push(
+            vscode.commands.registerCommand('m31-agent.runCommand', this.runCommand.bind(this)),
+            vscode.commands.registerCommand('m31-agent.executeSelectedCode', this.executeSelectedCode.bind(this)),
+            vscode.commands.registerCommand('m31-agent.createAndRunFile', this.createAndRunFile.bind(this)),
+            vscode.commands.registerCommand('m31-agent.executeInTerminal', this.executeInTerminal.bind(this))
+        );
 
-            if (!code.trim()) {
-                throw new Error('No code to execute');
-            }
+        this._logging.info('Registered code execution commands');
+    }
 
-            const languageId = vscode.window.activeTextEditor?.document.languageId || 'plaintext';
-            
-            await terminalService.executeCode(code, languageId);
-            
-            context.telemetryService.trackEvent('execute_code_in_terminal', {
-                language: languageId,
-                codeLength: code.length.toString()
+    private async runCommand(command?: string): Promise<string> {
+        if (!command) {
+            command = await vscode.window.showInputBox({
+                placeHolder: 'Enter command to run',
+                prompt: 'Run command in terminal'
             });
         }
-    );
 
-    registerCommand(
-        context,
-        'm31-agent.runCommand',
-        async (command?: string) => {
-            if (!command) {
-                command = await vscode.window.showInputBox({
-                    prompt: 'Enter command to run',
-                    placeHolder: 'e.g., npm install'
-                });
+        if (!command) {
+            return '';
+        }
+
+        this._logging.info(`Running command: ${command}`);
+        this._telemetry.trackEvent('command_executed', { commandType: 'terminal' });
+
+        const requireConfirmation = this._extensionContext.configurationService.isRequireConfirmation();
+        if (requireConfirmation) {
+            const confirmation = await vscode.window.showWarningMessage(
+                `Run command: ${command}?`,
+                { modal: true },
+                'Yes', 'No'
+            );
+
+            if (confirmation !== 'Yes') {
+                this._logging.info('Command execution cancelled by user');
+                return '';
             }
+        }
 
-            if (!command) {
-                return;
+        try {
+            return await this._terminalService.executeCommand(command, true);
+        } catch (error) {
+            this._logging.error(`Error executing command: ${error}`);
+            vscode.window.showErrorMessage(`Failed to execute command: ${error}`);
+            return '';
+        }
+    }
+
+    private async executeSelectedCode(): Promise<void> {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor');
+            return;
+        }
+
+        const selection = editor.selection;
+        if (selection.isEmpty) {
+            vscode.window.showInformationMessage('No code selected');
+            return;
+        }
+
+        const selectedText = editor.document.getText(selection);
+        this._logging.info('Executing selected code');
+        this._telemetry.trackEvent('command_executed', { commandType: 'selected_code' });
+
+        // Determine language to execute
+        const language = editor.document.languageId;
+        await this.executeCodeByLanguage(selectedText, language);
+    }
+
+    private async executeCodeByLanguage(code: string, language: string): Promise<void> {
+        let command = '';
+        let tempFile: string | undefined;
+
+        switch (language) {
+            case 'javascript':
+            case 'typescript':
+                command = `node -e "${code.replace(/"/g, '\\"')}"`;
+                break;
+            case 'python':
+                command = `python -c "${code.replace(/"/g, '\\"')}"`;
+                break;
+            case 'shellscript':
+            case 'bash':
+                command = code;
+                break;
+            default:
+                tempFile = await this.createTempFile(code, language);
+                if (tempFile) {
+                    command = this.getRunCommandForLanguage(language, tempFile);
+                }
+        }
+
+        if (!command) {
+            vscode.window.showWarningMessage(`Execution not supported for language: ${language}`);
+            return;
+        }
+
+        try {
+            await this.runCommand(command);
+        } finally {
+            if (tempFile) {
+                // Clean up temp file if needed
             }
+        }
+    }
 
-            if (context.configurationService.get<boolean>('requireConfirmation')) {
-                const confirmed = await vscode.window.showWarningMessage(
-                    `Run command: ${command}?`,
-                    { modal: false },
-                    'Run'
-                );
+    private async createTempFile(content: string, language: string): Promise<string | undefined> {
+        // Implementation would create a temporary file with the content
+        // For now, return a placeholder
+        return undefined;
+    }
 
-                if (confirmed !== 'Run') {
-                    return;
+    private getRunCommandForLanguage(language: string, filePath: string): string {
+        switch (language) {
+            case 'javascript':
+            case 'typescript':
+                return `node ${filePath}`;
+            case 'python':
+                return `python ${filePath}`;
+            case 'java':
+                return `java ${filePath}`;
+            case 'c':
+            case 'cpp':
+                return `g++ ${filePath} -o ${filePath}.out && ${filePath}.out`;
+            case 'csharp':
+                return `dotnet run ${filePath}`;
+            case 'go':
+                return `go run ${filePath}`;
+            case 'rust':
+                return `rustc ${filePath} && ${filePath.replace('.rs', '')}`;
+            default:
+                return '';
+        }
+    }
+
+    private async createAndRunFile(content: string, language: string, runAfterCreate = true): Promise<void> {
+        if (!content || !language) {
+            vscode.window.showWarningMessage('Content and language must be provided');
+            return;
+        }
+
+        try {
+            this._logging.info(`Creating file for language: ${language}`);
+            this._telemetry.trackEvent('file_created', { language });
+
+            // Create a new untitled file
+            const extension = this.getExtensionForLanguage(language);
+            const document = await vscode.workspace.openTextDocument({
+                content,
+                language
+            });
+
+            await vscode.window.showTextDocument(document);
+
+            if (runAfterCreate) {
+                await vscode.commands.executeCommand('workbench.action.files.save');
+                const filePath = document.uri.fsPath;
+                if (filePath) {
+                    const command = this.getRunCommandForLanguage(language, filePath);
+                    if (command) {
+                        await this.runCommand(command);
+                    }
                 }
             }
-
-            await terminalService.executeCommand(command);
-            
-            context.telemetryService.trackEvent('run_terminal_command', {
-                commandLength: command.length.toString()
-            });
+        } catch (error) {
+            this._logging.error(`Error creating file: ${error}`);
+            vscode.window.showErrorMessage(`Failed to create file: ${error}`);
         }
-    );
+    }
 
-    registerCommand(
-        context,
-        'm31-agent.runFile',
-        async (uri?: vscode.Uri) => {
-            if (!uri && vscode.window.activeTextEditor) {
-                uri = vscode.window.activeTextEditor.document.uri;
+    private getExtensionForLanguage(language: string): string {
+        switch (language) {
+            case 'javascript':
+                return '.js';
+            case 'typescript':
+                return '.ts';
+            case 'python':
+                return '.py';
+            case 'java':
+                return '.java';
+            case 'c':
+                return '.c';
+            case 'cpp':
+                return '.cpp';
+            case 'csharp':
+                return '.cs';
+            case 'go':
+                return '.go';
+            case 'rust':
+                return '.rs';
+            default:
+                return '.txt';
+        }
+    }
+
+    private async executeInTerminal(text?: string): Promise<void> {
+        if (!text) {
+            const editor = vscode.window.activeTextEditor;
+            if (editor) {
+                const selection = editor.selection;
+                text = selection.isEmpty ? 
+                    editor.document.getText() : 
+                    editor.document.getText(selection);
             }
-
-            if (!uri) {
-                throw new Error('No file to run');
-            }
-
-            const filePath = uri.fsPath;
-            const fileExtension = filePath.split('.').pop() || '';
-            
-            await terminalService.runFile(filePath, fileExtension);
-            
-            context.telemetryService.trackEvent('run_file', {
-                fileExtension
-            });
         }
-    );
 
-    registerCommand(
-        context,
-        'm31-agent.createTerminal',
-        async (name?: string) => {
-            if (!name) {
-                name = await vscode.window.showInputBox({
-                    prompt: 'Enter terminal name',
-                    placeHolder: 'Terminal name',
-                    value: 'M31 Agent Terminal'
-                });
-
-                if (!name) {
-                    return;
-                }
-            }
-
-            const terminal = terminalService.createTerminal(name);
-            terminal.show();
-            
-            context.telemetryService.trackEvent('create_terminal');
+        if (!text) {
+            vscode.window.showWarningMessage('No text to execute');
+            return;
         }
-    );
 
-    registerCommand(
-        context,
-        'm31-agent.stopExecution',
-        async () => {
-            await terminalService.killRunningProcess();
-            context.telemetryService.trackEvent('stop_execution');
-        }
-    );
+        await this._terminalService.runInTerminal(text);
+        this._logging.info('Command executed in terminal');
+        this._telemetry.trackEvent('command_executed', { commandType: 'terminal_direct' });
+    }
+
+    public dispose(): void {
+        this._disposables.forEach(d => d.dispose());
+    }
 } 

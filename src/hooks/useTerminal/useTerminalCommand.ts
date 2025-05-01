@@ -1,151 +1,147 @@
 import * as vscode from 'vscode';
-import { useLogging } from '../useLogging';
-import { TerminalService } from '../../services/terminal/terminalService';
-import { useExtensionContext } from '../useContext/useExtensionContext';
+import { ExtensionContext } from '../../models/context/extensionContext';
+import { TerminalService, CommandResult } from '../../services/terminal/terminalService';
 
-export interface UseTerminalCommandOptions {
-    terminalName?: string;
+export interface TerminalExecutionOptions {
     showTerminal?: boolean;
-    closeOnComplete?: boolean;
-}
-
-export interface UseTerminalCommandResult {
-    executeCommand: (command: string) => Promise<void>;
-    executeCode: (code: string, languageId: string) => Promise<void>;
-    runFile: (filePath: string, fileExtension: string) => Promise<void>;
-    createTerminal: (name?: string) => vscode.Terminal | undefined;
-    killProcess: () => Promise<void>;
-    getTerminal: () => vscode.Terminal | undefined;
+    captureOutput?: boolean;
+    name?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    requireConfirmation?: boolean;
 }
 
 export function useTerminalCommand(
-    options: UseTerminalCommandOptions = {}
-): UseTerminalCommandResult {
-    const logging = useLogging();
-    const { context } = useExtensionContext();
+    extensionContext: ExtensionContext
+): {
+    executeCommand: (command: string, options?: TerminalExecutionOptions) => Promise<string>;
+    executeCommandWithResult: (command: string, options?: TerminalExecutionOptions) => Promise<CommandResult>;
+    runInTerminal: (text: string, terminalName?: string) => Promise<void>;
+    killProcess: () => Promise<void>;
+    createTerminal: (name?: string, cwd?: string, env?: Record<string, string>) => vscode.Terminal;
+} {
+    const logging = extensionContext.loggingService;
+    const telemetry = extensionContext.telemetryService;
+    const configService = extensionContext.configurationService;
     
-    let terminalService: TerminalService | undefined;
-    try {
-        terminalService = TerminalService.getInstance();
-    } catch (error) {
-        if (context) {
-            terminalService = TerminalService.initialize(context);
-        }
-    }
+    // Get the terminal service instance
+    const terminalService = TerminalService.getInstance(extensionContext);
 
-    async function executeCommand(command: string): Promise<void> {
-        if (!terminalService) {
-            logging.error('Terminal service not available');
-            throw new Error('Terminal service not available');
-        }
-
-        logging.debug(`Executing terminal command: ${command}`);
+    async function executeCommand(command: string, options: TerminalExecutionOptions = {}): Promise<string> {
+        const { 
+            showTerminal = true, 
+            captureOutput = true, 
+            name = 'M31 Agent', 
+            requireConfirmation
+        } = options;
         
-        try {
-            await terminalService.executeCommand(
-                command, 
-                options.terminalName
+        logging.debug(`Executing command: ${command}`);
+        
+        // Check if confirmation is required
+        const shouldConfirm = requireConfirmation ?? configService.isRequireConfirmation();
+        
+        if (shouldConfirm) {
+            const confirmation = await vscode.window.showWarningMessage(
+                `Execute the following command?\n${command}`,
+                { modal: true },
+                'Yes', 'No'
             );
             
-            if (options.closeOnComplete) {
-                setTimeout(() => {
-                    const terminal = getTerminal();
-                    terminal?.dispose();
-                }, 1000);
+            if (confirmation !== 'Yes') {
+                logging.info('Command execution cancelled by user');
+                return '';
             }
-        } catch (error) {
-            logging.error('Failed to execute terminal command', error);
-            throw error;
         }
-    }
-
-    async function executeCode(code: string, languageId: string): Promise<void> {
-        if (!terminalService) {
-            logging.error('Terminal service not available');
-            throw new Error('Terminal service not available');
-        }
-
-        logging.debug(`Executing ${languageId} code in terminal`);
         
         try {
-            await terminalService.executeCode(code, languageId);
-        } catch (error) {
-            logging.error(`Failed to execute ${languageId} code in terminal`, error);
-            throw error;
-        }
-    }
-
-    async function runFile(filePath: string, fileExtension: string): Promise<void> {
-        if (!terminalService) {
-            logging.error('Terminal service not available');
-            throw new Error('Terminal service not available');
-        }
-
-        logging.debug(`Running file in terminal: ${filePath}`);
-        
-        try {
-            await terminalService.runFile(filePath, fileExtension);
-        } catch (error) {
-            logging.error('Failed to run file in terminal', error);
-            throw error;
-        }
-    }
-
-    function createTerminal(name?: string): vscode.Terminal | undefined {
-        if (!terminalService) {
-            logging.error('Terminal service not available');
-            return undefined;
-        }
-
-        const terminalName = name || options.terminalName || 'M31 Agent';
-        logging.debug(`Creating terminal: ${terminalName}`);
-        
-        try {
-            const terminal = terminalService.createTerminal(terminalName);
+            telemetry.trackEvent('terminal_command_executed', {
+                commandLength: command.length.toString()
+            });
             
-            if (options.showTerminal) {
-                terminal.show();
+            // Execute the command
+            return await terminalService.executeCommand(command, captureOutput);
+        } catch (error) {
+            logging.error(`Error executing command: ${error}`);
+            vscode.window.showErrorMessage(`Failed to execute command: ${error}`);
+            return '';
+        }
+    }
+    
+    async function executeCommandWithResult(command: string, options: TerminalExecutionOptions = {}): Promise<CommandResult> {
+        const { 
+            requireConfirmation, 
+            captureOutput = true 
+        } = options;
+        
+        logging.debug(`Executing command with result: ${command}`);
+        
+        // Check if confirmation is required
+        const shouldConfirm = requireConfirmation ?? configService.isRequireConfirmation();
+        
+        if (shouldConfirm) {
+            const confirmation = await vscode.window.showWarningMessage(
+                `Execute the following command?\n${command}`,
+                { modal: true },
+                'Yes', 'No'
+            );
+            
+            if (confirmation !== 'Yes') {
+                logging.info('Command execution cancelled by user');
+                return { output: '', exitCode: null };
             }
+        }
+        
+        try {
+            telemetry.trackEvent('terminal_command_executed', {
+                commandLength: command.length.toString()
+            });
             
-            return terminal;
+            // Execute the command
+            return await terminalService.executeCommandWithOutput(command);
         } catch (error) {
-            logging.error('Failed to create terminal', error);
-            return undefined;
+            logging.error(`Error executing command: ${error}`);
+            vscode.window.showErrorMessage(`Failed to execute command: ${error}`);
+            return { output: `Error: ${error}`, exitCode: 1 };
         }
     }
-
+    
+    async function runInTerminal(text: string, terminalName?: string): Promise<void> {
+        try {
+            await terminalService.runInTerminal(text);
+            logging.debug(`Text executed in terminal: ${text.length} characters`);
+            
+            telemetry.trackEvent('text_executed_in_terminal', {
+                textLength: text.length.toString()
+            });
+        } catch (error) {
+            logging.error(`Error running text in terminal: ${error}`);
+            vscode.window.showErrorMessage(`Failed to run text in terminal: ${error}`);
+        }
+    }
+    
     async function killProcess(): Promise<void> {
-        if (!terminalService) {
-            logging.error('Terminal service not available');
-            throw new Error('Terminal service not available');
-        }
-
-        logging.debug('Killing terminal process');
-        
         try {
             await terminalService.killRunningProcess();
+            logging.debug('Sent kill signal to terminal process');
         } catch (error) {
-            logging.error('Failed to kill terminal process', error);
-            throw error;
+            logging.error(`Error killing process: ${error}`);
         }
     }
-
-    function getTerminal(): vscode.Terminal | undefined {
-        const terminals = vscode.window.terminals;
+    
+    function createTerminal(name?: string, cwd?: string, env?: Record<string, string>): vscode.Terminal {
+        const terminal = terminalService.createTerminal(name || 'M31 Agent');
+        logging.debug(`Created terminal: ${name || 'M31 Agent'}`);
         
-        if (options.terminalName) {
-            return terminals.find(t => t.name === options.terminalName);
-        } else {
-            return vscode.window.activeTerminal;
-        }
+        telemetry.trackEvent('terminal_created');
+        
+        return terminal;
     }
-
+    
     return {
         executeCommand,
-        executeCode,
-        runFile,
-        createTerminal,
+        executeCommandWithResult,
+        runInTerminal,
         killProcess,
-        getTerminal
+        createTerminal
     };
 } 

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ExtensionContext } from '../../models/context/extensionContext';
 import { LoggingService } from '../../utils/logging/loggingService';
+import { TelemetryService } from '../../services/telemetry/telemetryService';
 
 export interface TerminalCommand {
     command: string;
@@ -11,265 +12,202 @@ export interface TerminalCommand {
     output?: string;
 }
 
-export class TerminalService {
-    private static instance: TerminalService;
-    private context: ExtensionContext;
-    private terminal: vscode.Terminal | undefined;
-    private terminals: Map<string, vscode.Terminal> = new Map();
-    private runningProcesses: Map<string, vscode.Terminal> = new Map();
-    private loggingService: LoggingService | undefined;
-    private commandHistory: TerminalCommand[] = [];
-    private static readonly MAX_HISTORY_SIZE = 100;
-    private disposables: vscode.Disposable[] = [];
-    private subscriptions: vscode.Disposable[] = [];
+export interface CommandResult {
+    output: string;
+    exitCode: number | null;
+}
 
-    private constructor(context: ExtensionContext) {
-        this.context = context;
-        TerminalService.instance = this;
-        this.loggingService = LoggingService.getInstance();
+export class TerminalService implements vscode.Disposable {
+    private static instance: TerminalService;
+    private terminals: Map<string, vscode.Terminal> = new Map();
+    private activeTerminal: vscode.Terminal | undefined;
+    private terminalOutputs: Map<string, string> = new Map();
+    private executingCommands: Map<string, boolean> = new Map();
+    private readonly disposables: vscode.Disposable[] = [];
+
+    private readonly _extensionContext: ExtensionContext;
+    private readonly _logging: LoggingService;
+    private readonly _telemetry: TelemetryService;
+
+    constructor(extensionContext: ExtensionContext) {
+        this._extensionContext = extensionContext;
+        this._logging = extensionContext.loggingService;
+        this._telemetry = extensionContext.telemetryService;
+
+        this.registerTerminalListeners();
     }
 
-    public static getInstance(): TerminalService {
+    public static getInstance(extensionContext: ExtensionContext): TerminalService {
         if (!TerminalService.instance) {
-            throw new Error('TerminalService not initialized');
+            TerminalService.instance = new TerminalService(extensionContext);
         }
         return TerminalService.instance;
     }
 
-    public static initialize(context: ExtensionContext): TerminalService {
-        TerminalService.instance = new TerminalService(context);
-        context.loggingService.debug('Terminal service initialized');
-        return TerminalService.instance;
+    private registerTerminalListeners(): void {
+        this.disposables.push(
+            vscode.window.onDidOpenTerminal(terminal => {
+                this.terminals.set(terminal.name, terminal);
+                this._logging.debug(`Terminal opened: ${terminal.name}`);
+            }),
+
+            vscode.window.onDidCloseTerminal(terminal => {
+                this.terminals.delete(terminal.name);
+                this.terminalOutputs.delete(terminal.name);
+                this.executingCommands.delete(terminal.name);
+                this._logging.debug(`Terminal closed: ${terminal.name}`);
+            }),
+
+            vscode.window.onDidChangeActiveTerminal(terminal => {
+                this.activeTerminal = terminal || undefined;
+                this._logging.debug(`Active terminal changed: ${terminal?.name || 'none'}`);
+            })
+        );
     }
 
     public createTerminal(name: string = 'M31 Agent'): vscode.Terminal {
-        this.context.loggingService.debug(`Creating terminal: ${name}`);
-        
         const terminal = vscode.window.createTerminal(name);
         this.terminals.set(name, terminal);
-        
+        this._logging.debug(`Terminal created: ${name}`);
         return terminal;
     }
 
-    public async executeCommand(command: string, terminalName?: string): Promise<void> {
-        this.context.loggingService.debug(`Executing command: ${command}`);
-        
-        let terminal: vscode.Terminal;
-        
-        if (terminalName && this.terminals.has(terminalName)) {
-            terminal = this.terminals.get(terminalName)!;
-        } else {
-            terminal = vscode.window.activeTerminal || 
-                this.terminal || 
-                this.createTerminal();
-            
-            this.terminal = terminal;
+    public getOrCreateTerminal(name: string = 'M31 Agent'): vscode.Terminal {
+        const existingTerminal = this.terminals.get(name);
+        if (existingTerminal) {
+            return existingTerminal;
         }
+        return this.createTerminal(name);
+    }
+
+    public async executeCommand(command: string, captureOutput: boolean = false): Promise<string> {
+        this._logging.debug(`Executing command: ${command}`);
         
-        terminal.show();
-        terminal.sendText(command);
+        if (captureOutput) {
+            try {
+                const result = await this.executeCommandWithOutput(command);
+                return result.output;
+            } catch (error) {
+                this._logging.error(`Error executing command with output: ${error}`);
+                throw error;
+            }
+        } else {
+            const terminal = this.getOrCreateTerminal();
+            terminal.show();
+            terminal.sendText(command);
+            return '';
+        }
+    }
+
+    public async executeCommandWithOutput(command: string): Promise<CommandResult> {
+        this._logging.debug(`Executing command with output: ${command}`);
         
-        this.runningProcesses.set(command, terminal);
-        
-        return new Promise<void>(resolve => {
-            setTimeout(() => {
-                this.runningProcesses.delete(command);
-                resolve();
-            }, 100);
+        return new Promise<CommandResult>((resolve, reject) => {
+            const execProcess = require('child_process').exec;
+            
+            execProcess(command, { maxBuffer: 10 * 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+                if (error) {
+                    this._logging.error(`Command execution error: ${error}`);
+                    resolve({
+                        output: stderr || stdout,
+                        exitCode: error.code
+                    });
+                } else {
+                    resolve({
+                        output: stdout,
+                        exitCode: 0
+                    });
+                }
+            });
         });
+    }
+
+    public async runInTerminal(text: string): Promise<void> {
+        const terminal = this.getOrCreateTerminal();
+        terminal.show();
+        terminal.sendText(text);
+        this._logging.debug(`Text sent to terminal: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`);
     }
 
     public async executeCode(code: string, languageId: string): Promise<void> {
-        this.context.loggingService.debug(`Executing ${languageId} code snippet`);
+        this._logging.debug(`Executing code of language: ${languageId}`);
         
+        let command = '';
         switch (languageId) {
             case 'javascript':
+                command = `node -e "${code.replace(/"/g, '\\"')}"`;
+                break;
             case 'typescript':
-                return this.executeJavaScript(code);
-                
+                command = `ts-node -e "${code.replace(/"/g, '\\"')}"`;
+                break;
             case 'python':
-                return this.executePython(code);
-                
+                command = `python -c "${code.replace(/"/g, '\\"')}"`;
+                break;
             case 'shellscript':
             case 'bash':
-                return this.executeShellScript(code);
-                
+                command = code;
+                break;
             default:
-                throw new Error(`Executing ${languageId} code is not supported`);
-        }
-    }
-
-    private async executeJavaScript(code: string): Promise<void> {
-        const tempFile = await this.createTempFile(code, 'js');
-        return this.executeCommand(`node "${tempFile}"`);
-    }
-
-    private async executePython(code: string): Promise<void> {
-        const tempFile = await this.createTempFile(code, 'py');
-        return this.executeCommand(`python "${tempFile}"`);
-    }
-
-    private async executeShellScript(code: string): Promise<void> {
-        const tempFile = await this.createTempFile(code, 'sh');
-        return this.executeCommand(`chmod +x "${tempFile}" && "${tempFile}"`);
-    }
-
-    private async createTempFile(content: string, extension: string): Promise<string> {
-        const fs = vscode.workspace.fs;
-        const tempDir = vscode.Uri.joinPath(vscode.workspace.workspaceFolders?.[0]?.uri || vscode.Uri.parse('file:///tmp'), '.m31-temp');
-        
-        try {
-            await fs.createDirectory(tempDir);
-        } catch (error) {
-            this.context.loggingService.debug('Temp directory already exists');
+                throw new Error(`Execution not supported for language: ${languageId}`);
         }
         
-        const timestamp = new Date().getTime();
-        const fileName = `m31_${timestamp}.${extension}`;
-        const fileUri = vscode.Uri.joinPath(tempDir, fileName);
-        
-        const encoder = new TextEncoder();
-        await fs.writeFile(fileUri, encoder.encode(content));
-        
-        return fileUri.fsPath;
+        await this.executeCommand(command);
     }
 
     public async runFile(filePath: string, fileExtension: string): Promise<void> {
-        this.context.loggingService.debug(`Running file: ${filePath}`);
+        this._logging.debug(`Running file: ${filePath}`);
         
-        let command: string;
+        const command = this.getRunCommandForFile(filePath, fileExtension);
+        if (!command) {
+            throw new Error(`Running files with extension ${fileExtension} is not supported`);
+        }
         
+        await this.executeCommand(command);
+    }
+
+    private getRunCommandForFile(filePath: string, fileExtension: string): string | null {
         switch (fileExtension.toLowerCase()) {
             case 'js':
-                command = `node "${filePath}"`;
-                break;
-                
+                return `node "${filePath}"`;
             case 'ts':
-                command = `ts-node "${filePath}"`;
-                break;
-                
+                return `ts-node "${filePath}"`;
             case 'py':
-                command = `python "${filePath}"`;
-                break;
-                
+                return `python "${filePath}"`;
             case 'sh':
-            case 'bash':
-                command = `chmod +x "${filePath}" && "${filePath}"`;
-                break;
-                
+                return `bash "${filePath}"`;
             case 'java':
-                command = `javac "${filePath}" && java "${filePath.replace('.java', '')}"`;
-                break;
-                
-            case 'cpp':
-            case 'cc':
-                command = `g++ "${filePath}" -o "${filePath}.out" && "${filePath}.out"`;
-                break;
-                
+                return `java "${filePath}"`;
             case 'c':
-                command = `gcc "${filePath}" -o "${filePath}.out" && "${filePath}.out"`;
-                break;
-                
+                return `gcc "${filePath}" -o "${filePath}.out" && "${filePath}.out"`;
+            case 'cpp':
+                return `g++ "${filePath}" -o "${filePath}.out" && "${filePath}.out"`;
             case 'go':
-                command = `go run "${filePath}"`;
-                break;
-                
+                return `go run "${filePath}"`;
             case 'rb':
-                command = `ruby "${filePath}"`;
-                break;
-                
+                return `ruby "${filePath}"`;
             case 'php':
-                command = `php "${filePath}"`;
-                break;
-                
+                return `php "${filePath}"`;
+            case 'rs':
+                return `rustc "${filePath}" && "${filePath.replace('.rs', '')}"`;
             default:
-                throw new Error(`Running files with extension .${fileExtension} is not supported`);
-        }
-        
-        return this.executeCommand(command);
-    }
-
-    public killRunningProcess(): Promise<void> {
-        this.context.loggingService.debug('Attempting to kill running process');
-        
-        if (vscode.window.activeTerminal) {
-            vscode.window.activeTerminal.sendText('\u0003'); // Ctrl+C
-            return Promise.resolve();
-        }
-        
-        return Promise.resolve();
-    }
-
-    public async initialize(): Promise<void> {
-        this.loggingService?.info('Initializing terminal service');
-        
-        // Load command history from workspace state
-        this.loadCommandHistory();
-        
-        // Listen for terminal close events
-        const terminalCloseListener = vscode.window.onDidCloseTerminal(terminal => {
-            if (terminal === this.terminal) {
-                this.terminal = undefined;
-                this.loggingService?.debug('Terminal closed');
-            }
-        });
-        
-        this.subscriptions.push(terminalCloseListener);
-        
-        this.loggingService?.info('Terminal service initialized');
-    }
-
-    public getCommandHistory(): TerminalCommand[] {
-        return [...this.commandHistory];
-    }
-
-    private trimCommandHistory(): void {
-        if (this.commandHistory.length > TerminalService.MAX_HISTORY_SIZE) {
-            this.commandHistory = this.commandHistory.slice(0, TerminalService.MAX_HISTORY_SIZE);
+                return null;
         }
     }
 
-    private loadCommandHistory(): void {
-        try {
-            const storedHistory = this.context.workspaceState.get<TerminalCommand[]>('m31-agent.terminalCommandHistory');
-            if (storedHistory) {
-                this.commandHistory = storedHistory;
-                this.loggingService?.debug(`Loaded ${storedHistory.length} terminal commands from history`);
-            }
-        } catch (error) {
-            this.loggingService?.error('Failed to load terminal command history', error);
+    public async killRunningProcess(): Promise<void> {
+        if (process.platform === 'win32') {
+            await this.executeCommand('\u0003'); // Ctrl+C
+        } else {
+            await this.executeCommand('\u0003'); // Ctrl+C
         }
-    }
-
-    private saveCommandHistory(): void {
-        try {
-            this.context.workspaceState.update('m31-agent.terminalCommandHistory', this.commandHistory);
-        } catch (error) {
-            this.loggingService?.error('Failed to save terminal command history', error);
-        }
-    }
-
-    public async clearCommandHistory(): Promise<void> {
-        this.commandHistory = [];
-        await this.saveCommandHistory();
-        this.loggingService?.debug('Terminal command history cleared');
+        this._logging.debug('Sent kill signal to running process');
     }
 
     public dispose(): void {
         this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
-        
-        if (this.terminal) {
-            this.terminal.dispose();
-            this.terminal = undefined;
-        }
-        
-        this.subscriptions.forEach(s => s.dispose());
-        this.subscriptions = [];
-        
         this.terminals.forEach(terminal => terminal.dispose());
         this.terminals.clear();
-        this.runningProcesses.clear();
-        TerminalService.instance = undefined as any;
+        this.terminalOutputs.clear();
+        this.executingCommands.clear();
     }
 }

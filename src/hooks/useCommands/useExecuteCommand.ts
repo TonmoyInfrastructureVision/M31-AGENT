@@ -1,60 +1,84 @@
 import * as vscode from 'vscode';
-import { useLogging } from '../useLogging';
+import { ExtensionContext } from '../../models/context/extensionContext';
+import { LoggingService } from '../../utils/logging/loggingService';
+import { TelemetryService } from '../../services/telemetry/telemetryService';
 
-export interface UseExecuteCommandResult {
-    executeCommand: <T>(command: string, ...args: any[]) => Promise<T | undefined>;
-    executeCommandWithProgress: <T>(
-        command: string, 
-        progressTitle: string, 
-        ...args: any[]
-    ) => Promise<T | undefined>;
+export interface CommandExecutionOptions {
+    args?: any[];
+    showErrorMessage?: boolean;
+    trackTelemetry?: boolean;
+    telemetryProperties?: Record<string, string>;
 }
 
-export function useExecuteCommand(): UseExecuteCommandResult {
-    const logging = useLogging();
+export function useExecuteCommand(
+    extensionContext: ExtensionContext
+): {
+    executeCommand: <T>(command: string, options?: CommandExecutionOptions) => Promise<T | undefined>;
+    registerCommand: (commandId: string, handler: (...args: any[]) => any) => vscode.Disposable;
+} {
+    const logging = extensionContext.loggingService;
+    const telemetry = extensionContext.telemetryService;
 
-    async function executeCommand<T>(command: string, ...args: any[]): Promise<T | undefined> {
+    async function executeCommand<T>(
+        command: string,
+        options: CommandExecutionOptions = {}
+    ): Promise<T | undefined> {
+        const { 
+            args = [], 
+            showErrorMessage = true, 
+            trackTelemetry = true,
+            telemetryProperties = {}
+        } = options;
+
         try {
-            logging.debug(`Executing command: ${command}`, { args });
+            logging.debug(`Executing command: ${command}`);
+            
+            if (trackTelemetry) {
+                telemetry.trackEvent('execute_command', {
+                    command,
+                    ...telemetryProperties
+                });
+            }
+
             return await vscode.commands.executeCommand<T>(command, ...args);
         } catch (error) {
-            logging.error(`Failed to execute command: ${command}`, error);
-            throw error;
+            logging.error(`Error executing command: ${command}`, error);
+            
+            if (showErrorMessage) {
+                vscode.window.showErrorMessage(`Failed to execute command: ${command}. ${error}`);
+            }
+            
+            return undefined;
         }
     }
 
-    async function executeCommandWithProgress<T>(
-        command: string,
-        progressTitle: string,
-        ...args: any[]
-    ): Promise<T | undefined> {
-        return vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: progressTitle,
-                cancellable: false
-            },
-            async (progress) => {
-                progress.report({ increment: 0 });
+    function registerCommand(
+        commandId: string,
+        handler: (...args: any[]) => any
+    ): vscode.Disposable {
+        logging.debug(`Registering command: ${commandId}`);
+        
+        const disposable = vscode.commands.registerCommand(commandId, async (...args: any[]) => {
+            try {
+                logging.debug(`Running command: ${commandId}`);
                 
-                try {
-                    logging.debug(`Executing command with progress: ${command}`, { args });
-                    
-                    progress.report({ increment: 50, message: 'Running...' });
-                    const result = await vscode.commands.executeCommand<T>(command, ...args);
-                    
-                    progress.report({ increment: 50, message: 'Complete' });
-                    return result;
-                } catch (error) {
-                    logging.error(`Failed to execute command with progress: ${command}`, error);
-                    throw error;
-                }
+                telemetry.trackEvent('command_executed', {
+                    commandId
+                });
+                
+                return await handler(...args);
+            } catch (error) {
+                logging.error(`Error running command: ${commandId}`, error);
+                vscode.window.showErrorMessage(`Error executing command: ${error}`);
+                throw error;
             }
-        );
+        });
+        
+        return disposable;
     }
 
     return {
         executeCommand,
-        executeCommandWithProgress
+        registerCommand
     };
 } 

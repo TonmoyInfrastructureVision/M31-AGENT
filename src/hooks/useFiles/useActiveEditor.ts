@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { useLogging } from '../useLogging';
+import { ExtensionContext } from '../../models/context/extensionContext';
 
 export interface FileInfo {
     uri: vscode.Uri;
@@ -33,8 +34,30 @@ export interface UseActiveEditorResult {
     refresh: () => EditorInfo;
 }
 
-export function useActiveEditor(): UseActiveEditorResult {
-    const logging = useLogging();
+export interface ActiveEditorInfo {
+    editor: vscode.TextEditor | undefined;
+    document: vscode.TextDocument | undefined;
+    selection: vscode.Selection | undefined;
+    selectedText: string;
+    languageId: string;
+    fileName: string;
+    uri: vscode.Uri | undefined;
+    lineCount: number;
+    isUntitled: boolean;
+}
+
+export function useActiveEditor(
+    extensionContext: ExtensionContext
+): {
+    getActiveEditorInfo: () => ActiveEditorInfo;
+    getSelectedText: () => string;
+    insertText: (text: string, position?: vscode.Position) => Promise<boolean>;
+    replaceSelection: (text: string) => Promise<boolean>;
+    getWordAtPosition: (position?: vscode.Position) => string;
+    getTextAroundPosition: (position?: vscode.Position, linesBefore?: number, linesAfter?: number) => string;
+    getDocumentText: () => string;
+} {
+    const logging = extensionContext.loggingService;
     const emptyEditorInfo: EditorInfo = {
         document: undefined,
         selection: undefined,
@@ -153,16 +176,86 @@ export function useActiveEditor(): UseActiveEditorResult {
         return undefined;
     }
 
+    function getActiveEditorInfo(): ActiveEditorInfo {
+        const editor = vscode.window.activeTextEditor;
+        const document = editor?.document;
+        const selection = editor?.selection;
+        const selectedText = selection ? document?.getText(selection) || '' : '';
+        const languageId = document?.languageId || '';
+        const fileName = document?.fileName || '';
+        const uri = document?.uri;
+        const lineCount = document?.lineCount || 0;
+        const isUntitled = document?.isUntitled || false;
+
+        return {
+            editor,
+            document,
+            selection,
+            selectedText,
+            languageId,
+            fileName,
+            uri,
+            lineCount,
+            isUntitled
+        };
+    }
+
+    function getSelectedText(): string {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return '';
+        }
+
+        const selection = editor.selection;
+        if (!selection || selection.isEmpty) {
+            return '';
+        }
+
+        return editor.document.getText(selection);
+    }
+
+    function getTextAroundPosition(
+        position?: vscode.Position, 
+        linesBefore: number = 2, 
+        linesAfter: number = 2
+    ): string {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return '';
+        }
+
+        const document = editor.document;
+        const pos = position || editor.selection.active;
+        
+        const startLine = Math.max(0, pos.line - linesBefore);
+        const endLine = Math.min(document.lineCount - 1, pos.line + linesAfter);
+        
+        const startPos = new vscode.Position(startLine, 0);
+        const endPos = new vscode.Position(endLine, document.lineAt(endLine).text.length);
+        
+        const range = new vscode.Range(startPos, endPos);
+        return document.getText(range);
+    }
+
+    function getDocumentText(): string {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return '';
+        }
+        
+        return editor.document.getText();
+    }
+
     const editorInfo = getCurrentEditorInfo();
     const isActive = !!getActiveEditor();
 
     return {
-        editorInfo,
-        isActive,
+        getActiveEditorInfo,
+        getSelectedText,
         insertText,
-        replaceText,
+        replaceSelection,
         getWordAtPosition,
-        getActiveEditor,
-        refresh: getCurrentEditorInfo
+        getTextAroundPosition,
+        getDocumentText
     };
 } 
