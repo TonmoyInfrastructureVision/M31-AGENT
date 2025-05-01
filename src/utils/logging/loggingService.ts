@@ -1,51 +1,54 @@
 import * as vscode from 'vscode';
-import { LogLevel } from './logLevel';
 import { ConfigurationService } from '../../services/configuration/configurationService';
 
-export class LoggingService implements vscode.Disposable {
-    private static instance: LoggingService;
-    private outputChannel: vscode.OutputChannel;
-    private disposables: vscode.Disposable[] = [];
-    private currentLogLevel: LogLevel = LogLevel.Info;
+export enum LogLevel {
+    Debug = 0,
+    Info = 1,
+    Warning = 2,
+    Error = 3,
+    None = 4
+}
 
-    constructor(private configService: ConfigurationService) {
+export class LoggingService implements vscode.Disposable {
+    private static instance: LoggingService | undefined;
+    private outputChannel: vscode.OutputChannel;
+    private configService: ConfigurationService;
+    private disposables: vscode.Disposable[] = [];
+
+    constructor(configService: ConfigurationService) {
+        this.outputChannel = vscode.window.createOutputChannel('M31-Agent');
+        this.configService = configService;
         LoggingService.instance = this;
-        this.outputChannel = vscode.window.createOutputChannel('M31-Agent', 'log');
-        this.updateLogLevel();
-        
-        this.disposables.push(
-            this.configService.onDidChangeConfiguration(e => {
-                if (e.affectsConfiguration('m31-agent.logLevel')) {
-                    this.updateLogLevel();
-                }
-            })
-        );
+
+        // Listen for configuration changes that affect logging
+        const disposable = this.configService.onConfigurationChanged(e => {
+            if (e.affectsConfiguration('m31-agent.logLevel')) {
+                this.info('Log level changed to: ' + this.getLogLevel());
+            }
+        });
+
+        this.disposables.push(disposable);
     }
 
-    public static getInstance(): LoggingService {
+    public static getInstance(): LoggingService | undefined {
         return LoggingService.instance;
     }
 
-    private updateLogLevel(): void {
-        const logLevelStr = this.configService.getLogLevel();
-        switch (logLevelStr) {
+    private getLogLevel(): LogLevel {
+        const configLevel = this.configService.getLogLevel();
+        switch (configLevel) {
             case 'debug':
-                this.currentLogLevel = LogLevel.Debug;
-                break;
+                return LogLevel.Debug;
             case 'info':
-                this.currentLogLevel = LogLevel.Info;
-                break;
+                return LogLevel.Info;
             case 'warning':
-                this.currentLogLevel = LogLevel.Warning;
-                break;
+                return LogLevel.Warning;
             case 'error':
-                this.currentLogLevel = LogLevel.Error;
-                break;
+                return LogLevel.Error;
             case 'none':
-                this.currentLogLevel = LogLevel.None;
-                break;
+                return LogLevel.None;
             default:
-                this.currentLogLevel = LogLevel.Info;
+                return LogLevel.Info;
         }
     }
 
@@ -64,29 +67,27 @@ export class LoggingService implements vscode.Disposable {
     public error(message: string, error?: any): void {
         this.log(LogLevel.Error, message, error);
         
-        // For errors, also show a notification if it's an actual error object
-        if (error instanceof Error) {
-            vscode.window.showErrorMessage(`${message}: ${error.message}`);
-        }
+        // Show error notification for critical errors
+        vscode.window.showErrorMessage(`M31-Agent Error: ${message}`);
     }
 
     private log(level: LogLevel, message: string, data?: any): void {
-        if (level > this.currentLogLevel || this.currentLogLevel === LogLevel.None) {
+        const currentLevel = this.getLogLevel();
+        
+        if (level < currentLevel) {
             return;
         }
 
         const timestamp = new Date().toISOString();
-        const levelStr = LogLevel[level].toUpperCase();
+        let logMessage = `[${timestamp}] [${LogLevel[level]}] ${message}`;
         
-        let logMessage = `[${timestamp}] [${levelStr}] ${message}`;
-        
-        if (data !== undefined) {
+        if (data) {
             if (data instanceof Error) {
                 logMessage += `\n${data.stack || data.message}`;
             } else if (typeof data === 'object') {
                 try {
                     logMessage += `\n${JSON.stringify(data, null, 2)}`;
-                } catch (err) {
+                } catch (e) {
                     logMessage += `\n[Object could not be stringified]`;
                 }
             } else {
@@ -96,10 +97,14 @@ export class LoggingService implements vscode.Disposable {
         
         this.outputChannel.appendLine(logMessage);
         
-        // Show the output channel for errors (optional)
-        if (level === LogLevel.Error) {
-            this.outputChannel.show(true);
+        // For debug level, also log to console in development mode
+        if (level === LogLevel.Debug && process.env.VSCODE_DEBUG_MODE === 'true') {
+            console.log(logMessage);
         }
+    }
+
+    public showOutputChannel(): void {
+        this.outputChannel.show();
     }
 
     public dispose(): void {

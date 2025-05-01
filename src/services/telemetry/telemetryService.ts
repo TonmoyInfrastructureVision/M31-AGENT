@@ -1,124 +1,122 @@
 import * as vscode from 'vscode';
-import * as uuid from 'uuid';
+import * as os from 'os';
+import { v4 as uuidv4 } from 'uuid';
 import { ConfigurationService } from '../configuration/configurationService';
+import { LoggingService } from '../../utils/logging/loggingService';
 
 export class TelemetryService implements vscode.Disposable {
-    private static instance: TelemetryService;
-    private readonly anonymousId: string;
-    private readonly startTime: number;
-    private telemetryEnabled: boolean;
+    private static instance: TelemetryService | undefined;
+    private isEnabled: boolean = true;
+    private userId: string = '';
+    private sessionId: string = '';
+    private configService: ConfigurationService;
+    private loggingService: LoggingService | undefined;
     private disposables: vscode.Disposable[] = [];
-    
-    constructor(private readonly configService: ConfigurationService) {
+
+    constructor(configService: ConfigurationService) {
+        this.configService = configService;
         TelemetryService.instance = this;
-        this.startTime = Date.now();
-        this.telemetryEnabled = this.configService.isTelemetryEnabled();
-        
-        // Generate or retrieve an anonymous ID for tracking
-        let telemetryId = this.configService.context.globalState.get<string>('m31AgentTelemetryId');
-        if (!telemetryId) {
-            telemetryId = uuid.v4();
-            this.configService.context.globalState.update('m31AgentTelemetryId', telemetryId);
-        }
-        this.anonymousId = telemetryId;
-        
+        this.sessionId = uuidv4();
+        this.initialize();
+
         // Listen for configuration changes
-        const disposable = this.configService.onDidChangeConfiguration(e => {
+        const disposable = this.configService.onConfigurationChanged(e => {
             if (e.affectsConfiguration('m31-agent.enableTelemetry')) {
-                this.telemetryEnabled = this.configService.isTelemetryEnabled();
+                this.isEnabled = this.configService.isTelemetryEnabled();
+                this.loggingService?.info(`Telemetry ${this.isEnabled ? 'enabled' : 'disabled'}`);
             }
         });
-        
+
         this.disposables.push(disposable);
     }
-    
-    public static getInstance(): TelemetryService {
+
+    public static getInstance(): TelemetryService | undefined {
         return TelemetryService.instance;
     }
-    
-    public trackEvent(eventName: string, properties?: Record<string, string>): void {
-        if (!this.telemetryEnabled) {
-            return;
+
+    private async initialize(): Promise<void> {
+        this.loggingService = LoggingService.getInstance();
+        this.isEnabled = this.configService.isTelemetryEnabled();
+
+        // Get user ID from global state or create a new one
+        this.userId = await this.getUserId();
+
+        this.loggingService?.debug(`Telemetry initialized, ID: ${this.getUserIdForLogging()}, telemetry enabled: ${this.isEnabled}`);
+    }
+
+    private async getUserId(): Promise<string> {
+        const context = vscode.extensions.getExtension('m31-agent')?.extensionContext;
+        if (!context) {
+            return uuidv4();
         }
-        
-        const enrichedProperties = {
-            ...properties,
-            extensionVersion: vscode.extensions.getExtension('m31-ai.m31-agent')?.packageJSON.version || 'unknown',
-            vsCodeVersion: vscode.version,
-            anonymousId: this.anonymousId,
-            timeStamp: new Date().toISOString()
-        };
-        
-        // In a real extension, you'd send this to your telemetry service
-        // For this implementation, we'll just log it
-        console.log(`TELEMETRY [${eventName}]`, JSON.stringify(enrichedProperties));
-    }
-    
-    public trackError(error: Error, properties?: Record<string, string>): void {
-        if (!this.telemetryEnabled) {
-            return;
+
+        const userId = context.globalState.get<string>('m31-agent.userId');
+        if (userId) {
+            return userId;
         }
-        
-        const errorProperties = {
-            ...properties,
-            errorName: error.name,
-            errorMessage: error.message,
-            errorStack: error.stack,
-        };
-        
-        this.trackEvent('error', errorProperties);
+
+        const newUserId = uuidv4();
+        await context.globalState.update('m31-agent.userId', newUserId);
+        return newUserId;
     }
-    
-    public trackCommandUsage(commandId: string): void {
-        this.trackEvent('command_executed', { commandId });
+
+    private getUserIdForLogging(): string {
+        return this.userId ? `${this.userId.substring(0, 8)}...` : 'unknown';
     }
-    
-    public trackSessionStart(): void {
-        this.trackEvent('session_start');
-    }
-    
-    public trackSessionEnd(): void {
-        const sessionDurationMs = Date.now() - this.startTime;
-        this.trackEvent('session_end', { 
-            durationMs: sessionDurationMs.toString(),
-            durationFormatted: this.formatDuration(sessionDurationMs)
-        });
-    }
-    
-    public trackAIRequest(
-        model: string,
-        totalTokens: number,
-        promptTokens: number,
-        completionTokens: number,
-        durationMs: number
+
+    public trackEvent(
+        eventName: string,
+        properties?: Record<string, string>,
+        measurements?: Record<string, number>
     ): void {
-        this.trackEvent('ai_request', {
-            model,
-            totalTokens: totalTokens.toString(),
-            promptTokens: promptTokens.toString(),
-            completionTokens: completionTokens.toString(),
-            durationMs: durationMs.toString(),
-            durationFormatted: this.formatDuration(durationMs)
-        });
-    }
-    
-    private formatDuration(durationMs: number): string {
-        if (durationMs < 1000) {
-            return `${durationMs}ms`;
+        if (!this.isEnabled) {
+            return;
         }
-        
-        const seconds = Math.floor(durationMs / 1000);
-        if (seconds < 60) {
-            return `${seconds}s`;
+
+        try {
+            // Basic event data
+            const eventData = {
+                eventName,
+                timestamp: new Date().toISOString(),
+                sessionId: this.sessionId,
+                userId: this.userId,
+                properties: properties || {},
+                measurements: measurements || {},
+                // System info (non-identifying)
+                system: {
+                    platform: process.platform,
+                    arch: process.arch,
+                    nodeVersion: process.version,
+                    osRelease: os.release(),
+                    memoryMB: Math.round(os.totalmem() / (1024 * 1024)),
+                    cpuCores: os.cpus().length
+                },
+                // VS Code info
+                vsCode: {
+                    version: vscode.version,
+                    isRemote: !!vscode.env.remoteName,
+                    remoteName: vscode.env.remoteName,
+                    uiKind: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
+                    language: vscode.env.language
+                },
+                // Extension info
+                extension: {
+                    version: vscode.extensions.getExtension('m31-agent')?.packageJSON.version || 'unknown'
+                }
+            };
+
+            // In real implementation, send to telemetry service
+            this.logEvent(eventData);
+        } catch (error) {
+            this.loggingService?.error('Failed to track telemetry event', error);
         }
-        
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = seconds % 60;
-        return `${minutes}m ${remainingSeconds}s`;
     }
-    
+
+    private logEvent(eventData: any): void {
+        this.loggingService?.debug(`TELEMETRY: ${eventData.eventName}`, eventData);
+    }
+
     public dispose(): void {
-        this.trackSessionEnd();
         this.disposables.forEach(d => d.dispose());
         this.disposables = [];
     }

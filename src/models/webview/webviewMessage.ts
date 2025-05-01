@@ -30,7 +30,7 @@ interface MessageMessage extends BaseWebviewMessage {
     payload: {
         message: {
             id: string;
-            role: 'user' | 'assistant' | 'system';
+            role: 'user' | 'assistant' | 'system' | 'error';
             content: string;
         };
     };
@@ -69,6 +69,27 @@ interface CancelRequestMessage extends BaseWebviewMessage {
     payload: {};
 }
 
+interface ExecuteCommandMessage extends BaseWebviewMessage {
+    type: WebviewMessageType.ExecuteCommand;
+    payload: {
+        command: string;
+    };
+}
+
+interface UpdateStreamContentMessage extends BaseWebviewMessage {
+    type: WebviewMessageType.UpdateStreamContent;
+    payload: {
+        content: string;
+    };
+}
+
+interface DisplayErrorMessage extends BaseWebviewMessage {
+    type: WebviewMessageType.DisplayError;
+    payload: {
+        message: string;
+    };
+}
+
 export type WebviewMessage =
     | InitializeMessage
     | UpdateConfigMessage
@@ -79,4 +100,7 @@ export type WebviewMessage =
     | ErrorMessage
     | ClearChatMessage
     | FocusInputMessage
-    | CancelRequestMessage; 
+    | CancelRequestMessage
+    | ExecuteCommandMessage
+    | UpdateStreamContentMessage
+    | DisplayErrorMessage; 

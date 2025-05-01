@@ -3,22 +3,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
 import { ExtensionContext } from '../../models/context/extensionContext';
-import { IFileSystemService } from './interfaces/fileSystemServiceInterface';
+import { LoggingService } from '../../utils/logging/loggingService';
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
 const mkdirAsync = promisify(fs.mkdir);
-const unlinkAsync = promisify(fs.unlink);
-const existsAsync = promisify(fs.exists);
 const statAsync = promisify(fs.stat);
 const readdirAsync = promisify(fs.readdir);
+const existsAsync = promisify(fs.exists);
 
-export class FileSystemService implements IFileSystemService, vscode.Disposable {
+export class FileSystemService implements vscode.Disposable {
     private static instance: FileSystemService | undefined;
-    private context: ExtensionContext;
+    private loggingService: LoggingService;
+    private disposables: vscode.Disposable[] = [];
 
-    constructor(context: ExtensionContext) {
-        this.context = context;
+    constructor(private context: ExtensionContext) {
+        this.loggingService = context.loggingService;
         FileSystemService.instance = this;
     }
 
@@ -26,186 +26,163 @@ export class FileSystemService implements IFileSystemService, vscode.Disposable 
         return FileSystemService.instance;
     }
 
-    public async readFile(filePath: string, encoding: BufferEncoding = 'utf8'): Promise<string> {
+    public async readFile(filePath: string): Promise<string> {
         try {
-            const content = await readFileAsync(filePath, { encoding });
+            this.loggingService.debug(`Reading file: ${filePath}`);
+            const content = await readFileAsync(filePath, 'utf8');
             return content;
         } catch (error) {
-            this.context.loggingService.error(`Failed to read file: ${filePath}`, error);
-            throw error;
+            this.loggingService.error(`Error reading file: ${filePath}`, error);
+            throw new Error(`Failed to read file: ${filePath}`);
         }
     }
 
-    public async writeFile(filePath: string, content: string, requireConfirmation: boolean = true): Promise<void> {
+    public async writeFile(filePath: string, content: string): Promise<void> {
         try {
-            const uri = vscode.Uri.file(filePath);
+            this.loggingService.debug(`Writing file: ${filePath}`);
             
-            // Check if the file exists
-            const fileExists = await this.fileExists(filePath);
+            // Create directory if it doesn't exist
+            const directory = path.dirname(filePath);
+            await this.ensureDirectoryExists(directory);
             
-            // If confirmation is required and file exists, prompt the user
-            if (requireConfirmation && fileExists && this.context.configurationService.isRequireConfirmation()) {
-                const overwrite = await vscode.window.showWarningMessage(
-                    `File '${path.basename(filePath)}' already exists. Do you want to overwrite it?`,
-                    { modal: true },
-                    'Overwrite'
-                );
-                
-                if (overwrite !== 'Overwrite') {
-                    this.context.loggingService.info(`User cancelled overwriting file ${filePath}`);
-                    return;
-                }
+            // Show confirmation dialog for file write
+            const confirmation = await vscode.window.showWarningMessage(
+                `The extension wants to write to the file: ${path.basename(filePath)}`,
+                { modal: true },
+                'Allow'
+            );
+            
+            if (confirmation !== 'Allow') {
+                this.loggingService.info(`User denied writing to file: ${filePath}`);
+                throw new Error('File write operation cancelled by user');
             }
             
-            // Ensure directory exists
-            await this.ensureDirectoryExists(path.dirname(filePath));
-            
-            // Write the file
-            const bytes = Buffer.from(content, 'utf8');
-            await vscode.workspace.fs.writeFile(uri, bytes);
-            
-            this.context.loggingService.info(`File written successfully: ${filePath}`);
-            this.context.telemetryService.trackEvent('file_written', { 
-                fileExtension: path.extname(filePath),
-                fileExists: fileExists.toString()
-            });
-            
-            // Open the file in the editor
-            const document = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(document);
+            await writeFileAsync(filePath, content, 'utf8');
+            this.loggingService.info(`File written: ${filePath}`);
         } catch (error) {
-            this.context.loggingService.error(`Failed to write file: ${filePath}`, error);
-            throw error;
+            this.loggingService.error(`Error writing file: ${filePath}`, error);
+            throw new Error(`Failed to write file: ${filePath}`);
         }
     }
 
-    public async deleteFile(filePath: string, requireConfirmation: boolean = true): Promise<void> {
+    public async ensureDirectoryExists(directoryPath: string): Promise<void> {
         try {
-            const uri = vscode.Uri.file(filePath);
-            
-            // Check if the file exists
-            const fileExists = await this.fileExists(filePath);
-            if (!fileExists) {
-                this.context.loggingService.warning(`File does not exist, cannot delete: ${filePath}`);
+            if (await this.exists(directoryPath)) {
                 return;
             }
-            
-            // If confirmation is required, prompt the user
-            if (requireConfirmation && this.context.configurationService.isRequireConfirmation()) {
-                const confirm = await vscode.window.showWarningMessage(
-                    `Are you sure you want to delete '${path.basename(filePath)}'?`,
-                    { modal: true },
-                    'Delete'
-                );
-                
-                if (confirm !== 'Delete') {
-                    this.context.loggingService.info(`User cancelled file deletion: ${filePath}`);
-                    return;
-                }
-            }
-            
-            // Delete the file
-            await vscode.workspace.fs.delete(uri, { useTrash: true });
-            
-            this.context.loggingService.info(`File deleted successfully: ${filePath}`);
-            this.context.telemetryService.trackEvent('file_deleted', { 
-                fileExtension: path.extname(filePath)
-            });
+
+            await mkdirAsync(directoryPath, { recursive: true });
+            this.loggingService.debug(`Created directory: ${directoryPath}`);
         } catch (error) {
-            this.context.loggingService.error(`Failed to delete file: ${filePath}`, error);
-            throw error;
+            this.loggingService.error(`Error creating directory: ${directoryPath}`, error);
+            throw new Error(`Failed to create directory: ${directoryPath}`);
         }
     }
 
-    public async exists(path: string): Promise<boolean> {
+    public async exists(filePath: string): Promise<boolean> {
         try {
-            return await existsAsync(path);
+            return await existsAsync(filePath);
         } catch (error) {
-            this.context.loggingService.error(`Failed to check if path exists: ${path}`, error);
+            this.loggingService.error(`Error checking if path exists: ${filePath}`, error);
             return false;
         }
     }
 
-    public async isDirectory(path: string): Promise<boolean> {
+    public async isDirectory(filePath: string): Promise<boolean> {
         try {
-            const stats = await statAsync(path);
+            const stats = await statAsync(filePath);
             return stats.isDirectory();
         } catch (error) {
-            this.context.loggingService.error(`Failed to check if path is directory: ${path}`, error);
+            this.loggingService.error(`Error checking if path is directory: ${filePath}`, error);
             return false;
         }
     }
 
-    public async listDirectory(dirPath: string): Promise<string[]> {
+    public async isFile(filePath: string): Promise<boolean> {
         try {
-            return await readdirAsync(dirPath);
+            const stats = await statAsync(filePath);
+            return stats.isFile();
         } catch (error) {
-            this.context.loggingService.error(`Failed to list directory: ${dirPath}`, error);
-            throw error;
-        }
-    }
-
-    public async findFiles(globPattern: string): Promise<vscode.Uri[]> {
-        try {
-            return await vscode.workspace.findFiles(globPattern);
-        } catch (error) {
-            this.context.loggingService.error(`Failed to find files with pattern: ${globPattern}`, error);
-            throw error;
-        }
-    }
-
-    public async getCurrentWorkspaceFolder(): Promise<string | undefined> {
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            return undefined;
-        }
-        
-        return workspaceFolders[0].uri.fsPath;
-    }
-
-    public async fileExists(filePath: string): Promise<boolean> {
-        try {
-            const uri = vscode.Uri.file(filePath);
-            await vscode.workspace.fs.stat(uri);
-            return true;
-        } catch {
+            this.loggingService.error(`Error checking if path is file: ${filePath}`, error);
             return false;
         }
     }
 
-    public async ensureDirectoryExists(dirPath: string): Promise<void> {
+    public async listDirectory(directoryPath: string): Promise<string[]> {
         try {
-            const uri = vscode.Uri.file(dirPath);
-            try {
-                await vscode.workspace.fs.stat(uri);
-                // Directory exists
-            } catch {
-                // Directory doesn't exist, create it
-                await vscode.workspace.fs.createDirectory(uri);
+            this.loggingService.debug(`Listing directory: ${directoryPath}`);
+            return await readdirAsync(directoryPath);
+        } catch (error) {
+            this.loggingService.error(`Error listing directory: ${directoryPath}`, error);
+            throw new Error(`Failed to list directory: ${directoryPath}`);
+        }
+    }
+
+    public async getFileStructure(directoryPath: string, maxDepth: number = 3): Promise<{ [key: string]: any }> {
+        return this.buildFileStructure(directoryPath, 0, maxDepth);
+    }
+
+    private async buildFileStructure(
+        currentPath: string, 
+        currentDepth: number, 
+        maxDepth: number
+    ): Promise<{ [key: string]: any }> {
+        if (currentDepth >= maxDepth) {
+            return {};
+        }
+
+        try {
+            const items = await readdirAsync(currentPath);
+            const result: { [key: string]: any } = {};
+
+            for (const item of items) {
+                const itemPath = path.join(currentPath, item);
+                const stats = await statAsync(itemPath);
+
+                if (stats.isDirectory()) {
+                    const children = await this.buildFileStructure(itemPath, currentDepth + 1, maxDepth);
+                    result[item] = { type: 'directory', children };
+                } else {
+                    const extension = path.extname(item);
+                    result[item] = { type: 'file', extension };
+                }
             }
+
+            return result;
         } catch (error) {
-            this.context.loggingService.error(`Failed to ensure directory exists: ${dirPath}`, error);
-            throw new Error(`Failed to create directory: ${dirPath}`);
+            this.loggingService.error(`Error building file structure for: ${currentPath}`, error);
+            return {};
         }
     }
 
-    public getWorkspaceFolders(): readonly vscode.WorkspaceFolder[] {
-        const folders = vscode.workspace.workspaceFolders;
-        if (!folders) {
-            return [];
-        }
+    public getWorkspaceFolders(): vscode.WorkspaceFolder[] {
+        const folders = vscode.workspace.workspaceFolders || [];
         return folders;
     }
 
-    public getActiveDocumentPath(): string | undefined {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (!activeEditor) {
-            return undefined;
+    public getWorkspaceRootPath(): string | undefined {
+        const folders = this.getWorkspaceFolders();
+        return folders.length > 0 ? folders[0].uri.fsPath : undefined;
+    }
+
+    public resolveWorkspacePath(relativePath: string): string | undefined {
+        const rootPath = this.getWorkspaceRootPath();
+        return rootPath ? path.join(rootPath, relativePath) : undefined;
+    }
+
+    public async findFilesInWorkspace(globPattern: string, excludePattern?: string): Promise<vscode.Uri[]> {
+        const workspaceFolders = this.getWorkspaceFolders();
+        if (workspaceFolders.length === 0) {
+            return [];
         }
-        return activeEditor.document.uri.fsPath;
+
+        return await vscode.workspace.findFiles(globPattern, excludePattern);
     }
 
     public dispose(): void {
-        // No resources to dispose
+        this.disposables.forEach(d => d.dispose());
+        this.disposables = [];
+    }
+} 
     }
 } 

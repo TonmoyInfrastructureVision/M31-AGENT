@@ -1,9 +1,12 @@
 const path = require('path');
 
+//@ts-check
+/** @typedef {import('webpack').Configuration} WebpackConfig **/
+
+/** @type WebpackConfig */
 const extensionConfig = {
   target: 'node',
-  mode: 'none',
-
+  mode: 'development',
   entry: './src/extension.ts',
   output: {
     path: path.resolve(__dirname, 'dist'),
@@ -31,27 +34,26 @@ const extensionConfig = {
   },
   devtool: 'nosources-source-map',
   infrastructureLogging: {
-    level: "log"
-  }
+    level: "log",
+  },
 };
 
+/** @type WebpackConfig */
 const webviewConfig = {
   target: 'web',
-  mode: 'none',
-
-  entry: './src/webview/index.tsx',
+  mode: 'development',
+  entry: './src/webview/index.ts',
   output: {
-    path: path.resolve(__dirname, 'dist', 'webview'),
-    filename: 'webview.js',
-    publicPath: ''
+    path: path.resolve(__dirname, 'dist'),
+    filename: 'webview.js'
   },
   resolve: {
-    extensions: ['.ts', '.tsx', '.js', '.jsx']
+    extensions: ['.ts', '.js']
   },
   module: {
     rules: [
       {
-        test: /\.tsx?$/,
+        test: /\.ts$/,
         exclude: /node_modules/,
         use: [
           {
@@ -61,11 +63,14 @@ const webviewConfig = {
       },
       {
         test: /\.css$/,
-        use: ['style-loader', 'css-loader']
+        use: [
+          'style-loader',
+          'css-loader'
+        ]
       }
     ]
   },
   devtool: 'nosources-source-map'
 };
 
-module.exports = [extensionConfig, webviewConfig]; 
+module.exports = [extensionConfig, webviewConfig];

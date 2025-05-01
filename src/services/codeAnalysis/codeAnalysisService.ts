@@ -22,13 +22,27 @@ export interface DependencyInfo {
     importLocations: string[];
 }
 
+export interface SearchResult {
+    uri: vscode.Uri;
+    relativePath: string;
+    score: number;
+    excerpt?: string;
+}
+
 export class CodeAnalysisService implements ICodeAnalysisService, vscode.Disposable {
     private static instance: CodeAnalysisService | undefined;
     private context: ExtensionContext;
+    private disposables: vscode.Disposable[] = [];
+    private fileSystemService: FileSystemService | undefined;
+    private languageService: LanguageSupportService | undefined;
 
     constructor(context: ExtensionContext) {
         this.context = context;
         CodeAnalysisService.instance = this;
+        
+        // Get required services
+        this.fileSystemService = FileSystemService.getInstance();
+        this.languageService = LanguageSupportService.getInstance();
     }
 
     public static getInstance(): CodeAnalysisService | undefined {
@@ -481,7 +495,8 @@ Don't explain the similarities, just list them.`;
     }
 
     public dispose(): void {
-        // No resources to dispose
+        this.disposables.forEach(d => d.dispose());
+        this.disposables = [];
     }
 
     private findSymbolInText(text: string, symbol: string): { line: number; character: number } | undefined {
@@ -540,5 +555,190 @@ Don't explain the similarities, just list them.`;
         };
         
         return extensionToLanguage[extension];
+    }
+
+    public async findRelevantFiles(searchQuery: string, maxResults: number = 10): Promise<SearchResult[]> {
+        try {
+            this.context.loggingService.debug(`Finding relevant files for query: ${searchQuery}`);
+            
+            // Get workspace folders
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                this.context.loggingService.warning('No workspace folders found');
+                return [];
+            }
+            
+            const workspaceRoot = workspaceFolders[0].uri.fsPath;
+            
+            // Find all relevant files using workspace search API
+            let searchResults: SearchResult[] = [];
+            
+            // First try to find exact matches
+            const exactMatches = await this.findExactMatches(searchQuery, maxResults);
+            searchResults = searchResults.concat(exactMatches);
+            
+            // If we need more results, try fuzzy matching
+            if (searchResults.length < maxResults) {
+                const fuzzyMatches = await this.findFuzzyMatches(searchQuery, maxResults - searchResults.length);
+                searchResults = searchResults.concat(fuzzyMatches);
+            }
+            
+            // Deduplicate and return top results sorted by score
+            const uniqueResults = this.deduplicateResults(searchResults);
+            const sortedResults = this.sortResultsByScore(uniqueResults);
+            
+            return sortedResults.slice(0, maxResults);
+        } catch (error) {
+            this.context.loggingService.error('Error finding relevant files', error);
+            return [];
+        }
+    }
+
+    private async findExactMatches(searchQuery: string, maxResults: number): Promise<SearchResult[]> {
+        try {
+            // Get workspace folders
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) {
+                return [];
+            }
+            
+            const workspaceRoot = workspaceFolders[0].uri;
+            
+            // Split search query into terms for better matching
+            const searchTerms = searchQuery.toLowerCase().split(/\s+/);
+            
+            // Search for terms in file content
+            const results: SearchResult[] = [];
+            
+            for (const term of searchTerms) {
+                if (term.length < 3) {
+                    continue; // Skip short terms
+                }
+                
+                // Use VS Code's search API to find matches in content
+                const contentMatches = await vscode.workspace.findTextInFiles(
+                    { pattern: term },
+                    { maxResults: maxResults * 2 }
+                );
+                
+                // Convert results to our format
+                for (const match of contentMatches) {
+                    const uri = match.uri;
+                    const relativePath = path.relative(workspaceRoot.fsPath, uri.fsPath);
+                    
+                    let score = 1.0;
+                    // Prioritize certain file types
+                    if (uri.fsPath.endsWith('.ts') || uri.fsPath.endsWith('.js')) {
+                        score += 0.5;
+                    }
+                    
+                    // Prioritize files with names matching the query
+                    const fileName = path.basename(uri.fsPath).toLowerCase();
+                    if (fileName.includes(term)) {
+                        score += 1.0;
+                    }
+                    
+                    // Get excerpt from the file if possible
+                    let excerpt: string | undefined;
+                    try {
+                        const document = await vscode.workspace.openTextDocument(uri);
+                        const text = document.getText();
+                        const index = text.toLowerCase().indexOf(term);
+                        if (index >= 0) {
+                            const start = Math.max(0, index - 50);
+                            const end = Math.min(text.length, index + term.length + 50);
+                            excerpt = text.substring(start, end).replace(/\s+/g, ' ').trim();
+                        }
+                    } catch (error) {
+                        // Unable to get excerpt
+                    }
+                    
+                    results.push({
+                        uri,
+                        relativePath,
+                        score,
+                        excerpt
+                    });
+                }
+            }
+            
+            return results;
+        } catch (error) {
+            this.context.loggingService.error('Error finding exact matches', error);
+            return [];
+        }
+    }
+
+    private async findFuzzyMatches(searchQuery: string, maxResults: number): Promise<SearchResult[]> {
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders) {
+                return [];
+            }
+            
+            const workspaceRoot = workspaceFolders[0].uri.fsPath;
+            
+            // Get all files in the workspace
+            const files = await vscode.workspace.findFiles('**/*.{ts,js,tsx,jsx,json,md}', '**/node_modules/**', 1000);
+            
+            const results: SearchResult[] = [];
+            
+            // Split search query into terms
+            const searchTerms = searchQuery.toLowerCase().split(/\s+/);
+            
+            for (const uri of files) {
+                const relativePath = path.relative(workspaceRoot, uri.fsPath);
+                const fileName = path.basename(uri.fsPath).toLowerCase();
+                
+                // Calculate match score
+                let score = 0;
+                
+                for (const term of searchTerms) {
+                    if (term.length < 3) {
+                        continue;
+                    }
+                    
+                    if (fileName.includes(term)) {
+                        score += 0.8;
+                    }
+                    
+                    if (relativePath.toLowerCase().includes(term)) {
+                        score += 0.5;
+                    }
+                }
+                
+                if (score > 0) {
+                    results.push({
+                        uri,
+                        relativePath,
+                        score
+                    });
+                }
+            }
+            
+            return results;
+        } catch (error) {
+            this.context.loggingService.error('Error finding fuzzy matches', error);
+            return [];
+        }
+    }
+
+    private deduplicateResults(results: SearchResult[]): SearchResult[] {
+        const seen = new Set<string>();
+        const uniqueResults: SearchResult[] = [];
+        
+        for (const result of results) {
+            const key = result.uri.toString();
+            if (!seen.has(key)) {
+                seen.add(key);
+                uniqueResults.push(result);
+            }
+        }
+        
+        return uniqueResults;
+    }
+
+    private sortResultsByScore(results: SearchResult[]): SearchResult[] {
+        return [...results].sort((a, b) => b.score - a.score);
     }
 } 

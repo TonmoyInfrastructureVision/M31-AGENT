@@ -1,113 +1,98 @@
 import * as vscode from 'vscode';
-import { ExtensionContext } from '../../models/context/extensionContext';
+import { EventEmitter } from 'events';
 import { ConfigurationService } from '../configuration/configurationService';
-
-const AUTH_SECRET_KEY = 'm31-agent.apiKey';
+import { LoggingService } from '../../utils/logging/loggingService';
 
 export class AuthenticationService implements vscode.Disposable {
-    private static instance: AuthenticationService;
+    private static instance: AuthenticationService | undefined;
+    private readonly API_KEY_SECRET = 'm31-agent.apiKey';
     private apiKey: string | undefined;
-    private isInitialized = false;
+    private loggingService: LoggingService | undefined;
     private disposables: vscode.Disposable[] = [];
-    
+    private readonly onAuthStatusChangedEmitter = new EventEmitter();
+
     constructor(
-        private readonly context: vscode.ExtensionContext,
-        private readonly configService: ConfigurationService
+        private context: vscode.ExtensionContext,
+        private configService: ConfigurationService
     ) {
         AuthenticationService.instance = this;
     }
 
-    public static getInstance(): AuthenticationService {
+    public static getInstance(): AuthenticationService | undefined {
         return AuthenticationService.instance;
     }
 
     public async initialize(): Promise<void> {
+        this.loggingService = LoggingService.getInstance();
+        
         try {
-            // Try to get the API key from secrets storage
-            this.apiKey = await this.context.secrets.get(AUTH_SECRET_KEY);
+            // Try to get the API key from secrets
+            this.apiKey = await this.context.secrets.get(this.API_KEY_SECRET);
             
-            // If not in secrets, check configuration
             if (!this.apiKey) {
-                const configApiKey = this.configService.get<string>('apiKey', '');
-                if (configApiKey) {
-                    // If found in configuration, move it to secrets
-                    await this.setApiKey(configApiKey);
-                    // Clear the API key from settings to avoid duplication
-                    await this.configService.update('apiKey', '', vscode.ConfigurationTarget.Global);
-                }
+                this.loggingService?.debug('No API key found in secrets storage');
+            } else {
+                this.loggingService?.debug('API key found in secrets storage');
             }
-            
-            // Register configuration change listener
-            const disposable = this.configService.onDidChangeConfiguration(async (e) => {
-                if (e.affectsConfiguration('m31-agent.apiKey')) {
-                    const configApiKey = this.configService.get<string>('apiKey', '');
-                    if (configApiKey) {
-                        await this.setApiKey(configApiKey);
-                        // Clear from settings after moving to secrets
-                        await this.configService.update('apiKey', '', vscode.ConfigurationTarget.Global);
-                    }
-                }
-            });
-            
-            this.disposables.push(disposable);
-            this.isInitialized = true;
         } catch (error) {
-            console.error('Failed to initialize authentication service:', error);
-            throw new Error('Failed to initialize authentication service');
+            this.loggingService?.error('Failed to initialize authentication service', error);
         }
     }
 
-    public async getApiKey(): Promise<string> {
-        if (!this.isInitialized) {
-            throw new Error('Authentication service is not initialized');
-        }
-        
-        // Try to get from cached value
-        if (this.apiKey) {
-            return this.apiKey;
-        }
-        
-        // Try to get from secrets
-        const secretKey = await this.context.secrets.get(AUTH_SECRET_KEY);
-        if (secretKey) {
-            this.apiKey = secretKey;
-            return secretKey;
-        }
-        
-        // If still not found, prompt the user
-        const key = await this.promptForApiKey();
-        if (key) {
-            await this.setApiKey(key);
-            return key;
-        }
-        
-        throw new Error('API key is not configured');
+    public async getApiKey(): Promise<string | undefined> {
+        return this.apiKey;
     }
 
     public async setApiKey(apiKey: string): Promise<void> {
-        await this.context.secrets.store(AUTH_SECRET_KEY, apiKey);
-        this.apiKey = apiKey;
+        try {
+            if (!apiKey.trim()) {
+                throw new Error('API key cannot be empty');
+            }
+
+            if (!apiKey.startsWith('sk-')) {
+                throw new Error('Invalid API key format. OpenRouter API keys should start with "sk-"');
+            }
+
+            // Store API key in secrets storage
+            await this.context.secrets.store(this.API_KEY_SECRET, apiKey);
+            this.apiKey = apiKey;
+            
+            this.loggingService?.info('API key saved successfully');
+            this.onAuthStatusChangedEmitter.emit('changed');
+        } catch (error) {
+            this.loggingService?.error('Failed to set API key', error);
+            throw error;
+        }
     }
 
     public async clearApiKey(): Promise<void> {
-        await this.context.secrets.delete(AUTH_SECRET_KEY);
-        this.apiKey = undefined;
+        try {
+            await this.context.secrets.delete(this.API_KEY_SECRET);
+            this.apiKey = undefined;
+            this.loggingService?.info('API key cleared successfully');
+            this.onAuthStatusChangedEmitter.emit('changed');
+        } catch (error) {
+            this.loggingService?.error('Failed to clear API key', error);
+            throw error;
+        }
     }
 
-    public isAuthenticated(): boolean {
-        return this.isInitialized && !!this.apiKey;
+    public hasApiKey(): boolean {
+        return !!this.apiKey;
     }
 
-    private async promptForApiKey(): Promise<string | undefined> {
-        const key = await vscode.window.showInputBox({
-            title: 'Enter OpenRouter API Key',
-            prompt: 'Please enter your OpenRouter API key',
-            password: true,
-            ignoreFocusOut: true,
-            placeHolder: 'sk-or-...'
-        });
-        
-        return key;
+    public async validateApiKey(apiKey: string): Promise<boolean> {
+        // TODO: Implement validation against the OpenRouter API
+        return apiKey.trim().startsWith('sk-');
+    }
+
+    public onAuthStatusChanged(listener: () => void): vscode.Disposable {
+        this.onAuthStatusChangedEmitter.on('changed', listener);
+        return {
+            dispose: () => {
+                this.onAuthStatusChangedEmitter.removeListener('changed', listener);
+            }
+        };
     }
 
     public dispose(): void {

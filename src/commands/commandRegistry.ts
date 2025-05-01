@@ -1,59 +1,77 @@
 import * as vscode from 'vscode';
 import { ExtensionContext } from '../models/context/extensionContext';
-import { RegisterShowChatPanelCommand } from './ui/showChatPanelCommand';
-import { RegisterGenerateCodeCommand } from './codeGeneration/generateCodeCommand';
-import { RegisterExplainCodeCommand } from './codeGeneration/explainCodeCommand';
-import { RegisterRunCommandCommand } from './terminal/runCommandCommand';
-import { RegisterNavigateCodebaseCommand } from './fileSystem/navigateCodebaseCommand';
-import { RegisterConfigureSettingsCommand } from './ui/configureSettingsCommand';
 import { StatusBarManager } from '../components/statusBar/statusBarManager';
 import { ChatPanelProvider } from '../components/chat/chatPanelProvider';
+
+// Import command registration functions
+import { RegisterConfigureSettingsCommand } from './ui/configureSettingsCommand';
+import { RegisterExplainCodeCommand } from './codeGeneration/explainCodeCommand';
+import { RegisterGenerateCodeCommand } from './codeGeneration/generateCodeCommand';
+import { RegisterRunCommandCommand } from './terminal/runCommandCommand';
+import { RegisterNavigateCodebaseCommand } from './fileSystem/navigateCodebaseCommand';
 
 export interface CommandDependencies {
     statusBarManager: StatusBarManager;
     chatPanelProvider: ChatPanelProvider;
 }
 
-export function registerAllCommands(context: ExtensionContext, dependencies: CommandDependencies): void {
-    context.loggingService.info('Registering commands');
-    
+export function registerAllCommands(
+    context: ExtensionContext,
+    dependencies: CommandDependencies
+): void {
+    context.loggingService.info('Registering extension commands');
+
+    // Show chat command
+    const showChatCommand = vscode.commands.registerCommand('m31-agent.showChat', () => {
+        dependencies.chatPanelProvider.show();
+    });
+    context.registerDisposable(showChatCommand);
+
     // Register UI commands
-    RegisterShowChatPanelCommand(context, dependencies);
-    RegisterConfigureSettingsCommand(context);
-    
+    RegisterConfigureSettingsCommand(context, dependencies);
+
     // Register code generation commands
-    RegisterGenerateCodeCommand(context, dependencies);
     RegisterExplainCodeCommand(context, dependencies);
-    
+    RegisterGenerateCodeCommand(context, dependencies);
+
     // Register terminal commands
     RegisterRunCommandCommand(context, dependencies);
-    
+
     // Register file system commands
     RegisterNavigateCodebaseCommand(context, dependencies);
-    
-    // Track command usage
-    registerCommandTracking(context);
-    
-    context.loggingService.info('All commands registered');
+
+    // Register keyboard shortcut commands
+    registerKeyboardShortcuts(context, dependencies);
+
+    context.loggingService.info('All commands registered successfully');
 }
 
-function registerCommandTracking(context: ExtensionContext): void {
-    // Register wrapper around executeCommand to track command usage
-    const originalExecuteCommand = vscode.commands.executeCommand;
-    
-    // Override executeCommand to track command usage for our extension's commands
-    vscode.commands.executeCommand = function<T>(command: string, ...rest: any[]): Thenable<T> {
-        if (command.startsWith('m31-agent.')) {
-            context.telemetryService.trackCommandUsage(command);
+function registerKeyboardShortcuts(context: ExtensionContext, dependencies: CommandDependencies): void {
+    // Quick chat command with keyboard shortcut (bound in package.json to e.g., Ctrl+Alt+M)
+    const quickChatCommand = vscode.commands.registerCommand('m31-agent.quickChat', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            dependencies.chatPanelProvider.show();
+            return;
         }
-        
-        return originalExecuteCommand.apply(vscode.commands, [command, ...rest]);
-    };
-    
-    // Restore original when extension is deactivated
-    context.registerDisposable({
-        dispose: () => {
-            vscode.commands.executeCommand = originalExecuteCommand;
+
+        const selection = editor.selection;
+        const selectedText = editor.document.getText(selection);
+
+        if (selectedText) {
+            dependencies.chatPanelProvider.show();
+            // TODO: Send selected text to chat when API available
+        } else {
+            const userPrompt = await vscode.window.showInputBox({
+                prompt: 'What can I help you with?',
+                placeHolder: 'Ask a question or request code help...'
+            });
+
+            if (userPrompt) {
+                dependencies.chatPanelProvider.show();
+                // TODO: Send prompt to chat when API available
+            }
         }
     });
+    context.registerDisposable(quickChatCommand);
 } 

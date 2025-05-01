@@ -1,5 +1,7 @@
 export interface AIModelConfiguration {
-    modelId: string;
-    maxTokens: number;
-    temperature: number;
+    id: string;
+    provider: string; 
+    displayName: string;
+    contextSize: number;
+    capabilities: string[];
 } 

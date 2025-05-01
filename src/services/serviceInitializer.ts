@@ -1,35 +1,51 @@
 import { ExtensionContext } from '../models/context/extensionContext';
 import { OpenRouterApiClient } from '../api/client/openRouterApiClient';
-import { CodeAnalysisService } from './codeAnalysis/codeAnalysisService';
 import { FileSystemService } from './fileSystem/fileSystemService';
 import { LanguageSupportService } from './languageSupport/languageSupportService';
+import { CodeAnalysisService } from './codeAnalysis/codeAnalysisService';
 import { TerminalService } from './terminal/terminalService';
 
+/**
+ * Initializes all services in the correct order to handle dependencies
+ */
 export async function initializeServices(context: ExtensionContext): Promise<void> {
-    const loggingService = context.loggingService;
-    loggingService.info('Initializing services...');
+    context.loggingService.info('Initializing services');
 
+    // Initialize core services in the correct order
     try {
-        // Initialize API clients
-        const openRouterClient = new OpenRouterApiClient(context);
-        await openRouterClient.initialize();
+        // 1. API Client
+        const apiClient = new OpenRouterApiClient(
+            context.configurationService,
+            context.authenticationService,
+            context.loggingService
+        );
+        await apiClient.initialize();
+        context.registerDisposable(apiClient);
+        context.loggingService.info('API client initialized');
 
-        // Initialize services
+        // 2. File System Service
         const fileSystemService = new FileSystemService(context);
-        const codeAnalysisService = new CodeAnalysisService(context);
-        const languageSupportService = new LanguageSupportService(context);
-        const terminalService = new TerminalService(context);
-
-        // Initialize state management
         context.registerDisposable(fileSystemService);
-        context.registerDisposable(codeAnalysisService);
-        context.registerDisposable(languageSupportService);
-        context.registerDisposable(terminalService);
-        context.registerDisposable(openRouterClient);
+        context.loggingService.info('File system service initialized');
 
-        loggingService.info('Services initialized successfully');
+        // 3. Language Support Service
+        const languageSupportService = new LanguageSupportService(context);
+        context.registerDisposable(languageSupportService);
+        context.loggingService.info('Language support service initialized');
+
+        // 4. Code Analysis Service
+        const codeAnalysisService = new CodeAnalysisService(context);
+        context.registerDisposable(codeAnalysisService);
+        context.loggingService.info('Code analysis service initialized');
+
+        // 5. Terminal Service
+        const terminalService = new TerminalService(context);
+        context.registerDisposable(terminalService);
+        context.loggingService.info('Terminal service initialized');
+
+        context.loggingService.info('All services initialized successfully');
     } catch (error) {
-        loggingService.error('Failed to initialize services', error);
-        throw error;
+        context.loggingService.error('Failed to initialize services', error);
+        throw new Error(`Service initialization failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-} 
+}

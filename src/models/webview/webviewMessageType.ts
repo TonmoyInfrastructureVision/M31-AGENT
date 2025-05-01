@@ -8,5 +8,8 @@ export enum WebviewMessageType {
     Error = 'error',
     ClearChat = 'clearChat',
     FocusInput = 'focusInput',
-    CancelRequest = 'cancelRequest'
+    CancelRequest = 'cancelRequest',
+    ExecuteCommand = 'executeCommand',
+    UpdateStreamContent = 'updateStreamContent',
+    DisplayError = 'displayError'
 } 
