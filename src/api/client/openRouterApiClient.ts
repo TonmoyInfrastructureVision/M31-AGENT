@@ -10,6 +10,11 @@ import { AIRequestType } from '../../models/ai/aiRequestType';
 import { ConfigurationService } from '../../services/configuration/configurationService';
 import { LoggingService } from '../../utils/logging/loggingService';
 import { AuthenticationService } from '../../services/authentication/authenticationService';
+import { v4 as uuidv4 } from 'uuid';
+import { AIModel, AIProvider } from '../../models/ai/aiModels';
+import { OpenRouterChatRequest, OpenRouterChatResponse, OpenRouterModelsResponse } from '../../models/ai/openRouterTypes';
+import { ApiError } from '../../models/responses/apiError';
+import { ChatMessage, ChatRole } from '../../models/ai/chatTypes';
 
 export interface AIMessage {
     role: 'system' | 'user' | 'assistant';
@@ -41,16 +46,19 @@ export class OpenRouterApiClient implements vscode.Disposable {
     private configService: ConfigurationService;
     private authService: AuthenticationService;
     private loggingService: LoggingService;
+    private context: ExtensionContext;
 
     constructor(
         configService: ConfigurationService,
         authService: AuthenticationService,
-        loggingService: LoggingService
+        loggingService: LoggingService,
+        context: ExtensionContext
     ) {
         OpenRouterApiClient.instance = this;
         this.configService = configService;
         this.authService = authService;
         this.loggingService = loggingService;
+        this.context = context;
 
         this.client = axios.create({
             baseURL: this.baseUrl,
@@ -60,6 +68,8 @@ export class OpenRouterApiClient implements vscode.Disposable {
                 'User-Agent': 'M31-Agent/1.0.0'
             }
         });
+
+        this.setupInterceptors();
     }
 
     public static getInstance(): OpenRouterApiClient {
@@ -212,7 +222,7 @@ export class OpenRouterApiClient implements vscode.Disposable {
 
             stream.on('error', (error: Error) => {
                 this.loggingService.error('Streaming completion error', error);
-                onError(error);
+                onError(error instanceof Error ? error : new Error(String(error)));
             });
         } catch (error) {
             this.handleApiError('Failed to create streaming completion', error);
@@ -392,5 +402,254 @@ export class OpenRouterApiClient implements vscode.Disposable {
         this.loggingService.debug('Disposing OpenRouter API client');
         this.disposables.forEach(d => d.dispose());
         this.disposables = [];
+    }
+
+    private setupInterceptors(): void {
+        this.client.interceptors.request.use(
+            (config) => {
+                if (this.getApiKey()) {
+                    config.headers['Authorization'] = `Bearer ${this.getApiKey()}`;
+                }
+                
+                this.loggingService.debug('API Request', {
+                    url: config.url,
+                    method: config.method,
+                    data: config.data ? JSON.stringify(config.data).substring(0, 500) : undefined
+                });
+                
+                return config;
+            },
+            (error) => {
+                this.loggingService.error('API Request Error', error);
+                return Promise.reject(error);
+            }
+        );
+
+        this.client.interceptors.response.use(
+            (response) => {
+                this.loggingService.debug('API Response', {
+                    status: response.status,
+                    statusText: response.statusText,
+                    data: response.data ? JSON.stringify(response.data).substring(0, 500) : undefined
+                });
+                
+                return response;
+            },
+            (error) => {
+                const apiError = this.handleApiError('API Response Error', error);
+                this.loggingService.error('API Response Error', apiError);
+                return Promise.reject(apiError);
+            }
+        );
+    }
+
+    private getApiKey(): string {
+        return this.authService.getApiKey();
+    }
+
+    public async listModels(): Promise<AIModel[]> {
+        try {
+            const response = await this.client.get<OpenRouterModelsResponse>('/models');
+            
+            return response.data.data.map(model => ({
+                id: model.id,
+                name: model.name || model.id,
+                provider: this.getProviderFromModelId(model.id),
+                contextWindow: model.context_length || 4096,
+                inputPricePerToken: model.pricing?.input || 0,
+                outputPricePerToken: model.pricing?.output || 0,
+                maxTokens: model.context_length || 4096,
+                features: {
+                    chat: true,
+                    codeGeneration: true,
+                    embeddings: !!model.capabilities?.includes('embeddings')
+                }
+            }));
+        } catch (error) {
+            this.loggingService.error('Failed to list models', error);
+            throw error;
+        }
+    }
+
+    private getProviderFromModelId(modelId: string): AIProvider {
+        if (modelId.startsWith('openai/')) {
+            return AIProvider.OpenAI;
+        } else if (modelId.startsWith('anthropic/')) {
+            return AIProvider.Anthropic;
+        } else if (modelId.startsWith('google/')) {
+            return AIProvider.Google;
+        } else if (modelId.startsWith('meta/')) {
+            return AIProvider.Meta;
+        } else {
+            return AIProvider.Other;
+        }
+    }
+
+    public async generateChatCompletion(
+        messages: ChatMessage[],
+        options: {
+            modelId?: string;
+            temperature?: number;
+            maxTokens?: number;
+            stopSequences?: string[];
+            frequencyPenalty?: number;
+            presencePenalty?: number;
+            topP?: number;
+            stream?: boolean;
+            streamCallbacks?: {
+                onToken: (token: string) => void;
+                onComplete: (response: OpenRouterChatResponse) => void;
+                onError: (error: ApiError) => void;
+            };
+        }
+    ): Promise<OpenRouterChatResponse> {
+        const modelId = options.modelId || this.configService.getModelId();
+        const temperature = options.temperature ?? this.configService.getTemperature() ?? 0.7;
+        const maxTokens = options.maxTokens ?? this.configService.getMaxTokens() ?? 1024;
+        
+        const requestData: OpenRouterChatRequest = {
+            model: modelId,
+            messages: messages.map(m => ({
+                role: m.role,
+                content: m.content,
+                name: m.name
+            })),
+            temperature,
+            max_tokens: maxTokens,
+            top_p: options.topP ?? 1,
+            frequency_penalty: options.frequencyPenalty ?? 0,
+            presence_penalty: options.presencePenalty ?? 0,
+            stop: options.stopSequences,
+            stream: options.stream ?? false,
+            route: 'fallback',
+            request_id: uuidv4()
+        };
+
+        const requestConfig: AxiosRequestConfig = {
+            responseType: options.stream ? 'stream' : 'json'
+        };
+
+        try {
+            if (options.stream && options.streamCallbacks) {
+                return await this.streamChatCompletion(requestData, options.streamCallbacks);
+            } else {
+                const response = await this.client.post<OpenRouterChatResponse>(
+                    '/chat/completions',
+                    requestData,
+                    requestConfig
+                );
+                
+                this.loggingService.trackEvent('api_chat_completion', {
+                    model: modelId,
+                    messageCount: messages.length.toString(),
+                    tokensUsed: (response.data.usage?.total_tokens || 0).toString()
+                });
+                
+                return response.data;
+            }
+        } catch (error) {
+            this.loggingService.error('Chat completion failed', error);
+            throw error;
+        }
+    }
+
+    private async streamChatCompletion(
+        requestData: OpenRouterChatRequest,
+        callbacks: {
+            onToken: (token: string) => void;
+            onComplete: (response: OpenRouterChatResponse) => void;
+            onError: (error: ApiError) => void;
+        }
+    ): Promise<OpenRouterChatResponse> {
+        requestData.stream = true;
+        
+        try {
+            const response = await this.client.post('/chat/completions', requestData, {
+                responseType: 'stream'
+            });
+            
+            const stream = response.data;
+            let fullResponse: OpenRouterChatResponse | null = null;
+            let accumulatedData = '';
+            
+            return new Promise<OpenRouterChatResponse>((resolve, reject) => {
+                stream.on('data', (chunk: Buffer) => {
+                    try {
+                        const chunkString = chunk.toString();
+                        accumulatedData += chunkString;
+                        
+                        const lines = accumulatedData.split('\n');
+                        accumulatedData = lines.pop() || '';
+                        
+                        for (const line of lines) {
+                            if (line.trim() === '') continue;
+                            if (line.trim() === 'data: [DONE]') continue;
+                            
+                            const jsonStr = line.replace(/^data: /, '').trim();
+                            if (!jsonStr) continue;
+                            
+                            const parsedChunk = JSON.parse(jsonStr);
+                            
+                            if (parsedChunk.choices?.[0]?.delta?.content) {
+                                const token = parsedChunk.choices[0].delta.content;
+                                callbacks.onToken(token);
+                            }
+                            
+                            fullResponse = parsedChunk;
+                        }
+                    } catch (error) {
+                        this.loggingService.error('Error parsing stream chunk', error);
+                    }
+                });
+
+                stream.on('end', () => {
+                    if (fullResponse) {
+                        callbacks.onComplete(fullResponse);
+                        resolve(fullResponse);
+                        
+                        this.loggingService.trackEvent('api_chat_completion_stream', {
+                            model: requestData.model,
+                            messageCount: requestData.messages.length.toString(),
+                            tokensUsed: (fullResponse.usage?.total_tokens || 0).toString()
+                        });
+                    } else {
+                        const error = new ApiError(500, 'Stream ended without a complete response', 'stream_error');
+                        callbacks.onError(error);
+                        reject(error);
+                    }
+                });
+
+                stream.on('error', (error: any) => {
+                    const apiError = this.handleApiError('Stream error', error);
+                    callbacks.onError(apiError);
+                    reject(apiError);
+                });
+            });
+        } catch (error) {
+            const apiError = this.handleApiError('Stream error', error);
+            callbacks.onError(apiError);
+            throw apiError;
+        }
+    }
+
+    public createSystemMessage(content: string): ChatMessage {
+        return {
+            role: ChatRole.System,
+            content
+        };
+    }
+
+    public createUserMessage(content: string): ChatMessage {
+        return {
+            role: ChatRole.User,
+            content
+        };
+    }
+
+    public createAssistantMessage(content: string): ChatMessage {
+        return {
+            role: ChatRole.Assistant,
+            content
+        };
     }
 } 

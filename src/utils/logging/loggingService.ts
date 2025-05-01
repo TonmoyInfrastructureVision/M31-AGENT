@@ -9,34 +9,41 @@ export enum LogLevel {
     None = 4
 }
 
-export class LoggingService implements vscode.Disposable {
-    private static instance: LoggingService | undefined;
+export interface LogEntry {
+    level: LogLevel;
+    message: string;
+    timestamp: Date;
+    data?: any;
+}
+
+export class LoggingService {
+    private static instance: LoggingService;
     private outputChannel: vscode.OutputChannel;
-    private configService: ConfigurationService;
-    private disposables: vscode.Disposable[] = [];
+    private logLevel: LogLevel = LogLevel.Info;
+    private logs: LogEntry[] = [];
+    private readonly maxLogsLength = 1000;
 
-    constructor(configService: ConfigurationService) {
-        this.outputChannel = vscode.window.createOutputChannel('M31-Agent');
-        this.configService = configService;
+    constructor(private readonly configService: ConfigurationService) {
         LoggingService.instance = this;
+        this.outputChannel = vscode.window.createOutputChannel('M31 Agent');
+        this.setLogLevel(this.getLogLevelFromConfig());
 
-        // Listen for configuration changes that affect logging
-        const disposable = this.configService.onConfigurationChanged(e => {
-            if (e.affectsConfiguration('m31-agent.logLevel')) {
-                this.info('Log level changed to: ' + this.getLogLevel());
-            }
+        this.configService.onConfigChanged(() => {
+            this.setLogLevel(this.getLogLevelFromConfig());
         });
-
-        this.disposables.push(disposable);
     }
 
-    public static getInstance(): LoggingService | undefined {
+    public static getInstance(): LoggingService {
+        if (!LoggingService.instance) {
+            throw new Error('LoggingService not initialized');
+        }
         return LoggingService.instance;
     }
 
-    private getLogLevel(): LogLevel {
-        const configLevel = this.configService.getLogLevel();
-        switch (configLevel) {
+    private getLogLevelFromConfig(): LogLevel {
+        const logLevelString = this.configService.getLogLevel();
+        
+        switch (logLevelString) {
             case 'debug':
                 return LogLevel.Debug;
             case 'info':
@@ -52,6 +59,15 @@ export class LoggingService implements vscode.Disposable {
         }
     }
 
+    public setLogLevel(level: LogLevel): void {
+        this.logLevel = level;
+        this.debug(`Log level set to ${LogLevel[level]}`);
+    }
+
+    public getLogLevel(): LogLevel {
+        return this.logLevel;
+    }
+
     public debug(message: string, data?: any): void {
         this.log(LogLevel.Debug, message, data);
     }
@@ -64,52 +80,81 @@ export class LoggingService implements vscode.Disposable {
         this.log(LogLevel.Warning, message, data);
     }
 
-    public error(message: string, error?: any): void {
-        this.log(LogLevel.Error, message, error);
-        
-        // Show error notification for critical errors
-        vscode.window.showErrorMessage(`M31-Agent Error: ${message}`);
+    public error(message: string, data?: any): void {
+        this.log(LogLevel.Error, message, data);
     }
 
     private log(level: LogLevel, message: string, data?: any): void {
-        const currentLevel = this.getLogLevel();
-        
-        if (level < currentLevel) {
+        if (level < this.logLevel) {
             return;
         }
 
-        const timestamp = new Date().toISOString();
-        let logMessage = `[${timestamp}] [${LogLevel[level]}] ${message}`;
-        
-        if (data) {
-            if (data instanceof Error) {
-                logMessage += `\n${data.stack || data.message}`;
-            } else if (typeof data === 'object') {
-                try {
-                    logMessage += `\n${JSON.stringify(data, null, 2)}`;
-                } catch (e) {
-                    logMessage += `\n[Object could not be stringified]`;
-                }
-            } else {
-                logMessage += `\n${data}`;
-            }
+        const timestamp = new Date();
+        const logEntry: LogEntry = {
+            level,
+            message,
+            timestamp,
+            data
+        };
+
+        this.logs.push(logEntry);
+        if (this.logs.length > this.maxLogsLength) {
+            this.logs.shift();
         }
-        
-        this.outputChannel.appendLine(logMessage);
-        
-        // For debug level, also log to console in development mode
-        if (level === LogLevel.Debug && process.env.VSCODE_DEBUG_MODE === 'true') {
-            console.log(logMessage);
+
+        const formattedMessage = this.formatLogEntry(logEntry);
+        this.outputChannel.appendLine(formattedMessage);
+
+        if (level === LogLevel.Error) {
+            console.error(formattedMessage);
         }
     }
 
-    public showOutputChannel(): void {
+    private formatLogEntry(entry: LogEntry): string {
+        const levelString = LogLevel[entry.level].padEnd(7);
+        const timestamp = entry.timestamp.toISOString();
+        let message = `[${timestamp}] [${levelString}] ${entry.message}`;
+
+        if (entry.data) {
+            try {
+                if (entry.data instanceof Error) {
+                    message += `\n${entry.data.stack || entry.data.message}`;
+                } else if (typeof entry.data === 'object') {
+                    message += `\n${JSON.stringify(entry.data, null, 2)}`;
+                } else {
+                    message += `\n${String(entry.data)}`;
+                }
+            } catch (error) {
+                message += `\n[Error serializing log data: ${error}]`;
+            }
+        }
+
+        return message;
+    }
+
+    public show(): void {
         this.outputChannel.show();
+    }
+
+    public getLogs(): LogEntry[] {
+        return [...this.logs];
+    }
+
+    public clearLogs(): void {
+        this.logs = [];
+        this.outputChannel.clear();
+    }
+
+    public exportLogs(): string {
+        return this.logs.map(log => this.formatLogEntry(log)).join('\n');
+    }
+
+    public trackEvent(eventName: string, properties?: Record<string, string>): void {
+        this.debug(`TELEMETRY: ${eventName}`, properties);
     }
 
     public dispose(): void {
         this.outputChannel.dispose();
-        this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
+        LoggingService.instance = undefined as any;
     }
 } 

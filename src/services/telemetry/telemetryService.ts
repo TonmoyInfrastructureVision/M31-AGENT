@@ -4,120 +4,113 @@ import { v4 as uuidv4 } from 'uuid';
 import { ConfigurationService } from '../configuration/configurationService';
 import { LoggingService } from '../../utils/logging/loggingService';
 
-export class TelemetryService implements vscode.Disposable {
-    private static instance: TelemetryService | undefined;
-    private isEnabled: boolean = true;
-    private userId: string = '';
-    private sessionId: string = '';
-    private configService: ConfigurationService;
-    private loggingService: LoggingService | undefined;
-    private disposables: vscode.Disposable[] = [];
+export class TelemetryService {
+    private static instance: TelemetryService;
+    private telemetryEnabled: boolean;
+    private userId: string;
+    private sessionId: string;
+    private extensionVersion: string;
 
-    constructor(configService: ConfigurationService) {
-        this.configService = configService;
+    constructor(
+        private readonly configService: ConfigurationService,
+        private readonly loggingService: LoggingService = LoggingService.getInstance()
+    ) {
         TelemetryService.instance = this;
+        this.telemetryEnabled = this.configService.isEnableTelemetry();
         this.sessionId = uuidv4();
-        this.initialize();
+        this.userId = this.getUserId();
+        this.extensionVersion = this.getExtensionVersion();
 
-        // Listen for configuration changes
-        const disposable = this.configService.onConfigurationChanged(e => {
-            if (e.affectsConfiguration('m31-agent.enableTelemetry')) {
-                this.isEnabled = this.configService.isTelemetryEnabled();
-                this.loggingService?.info(`Telemetry ${this.isEnabled ? 'enabled' : 'disabled'}`);
-            }
+        this.configService.onConfigChanged(() => {
+            this.telemetryEnabled = this.configService.isEnableTelemetry();
         });
-
-        this.disposables.push(disposable);
     }
 
-    public static getInstance(): TelemetryService | undefined {
+    public static getInstance(): TelemetryService {
+        if (!TelemetryService.instance) {
+            throw new Error('TelemetryService not initialized');
+        }
         return TelemetryService.instance;
     }
 
-    private async initialize(): Promise<void> {
-        this.loggingService = LoggingService.getInstance();
-        this.isEnabled = this.configService.isTelemetryEnabled();
-
-        // Get user ID from global state or create a new one
-        this.userId = await this.getUserId();
-
-        this.loggingService?.debug(`Telemetry initialized, ID: ${this.getUserIdForLogging()}, telemetry enabled: ${this.isEnabled}`);
+    private getExtensionVersion(): string {
+        const extension = vscode.extensions.getExtension('m31-ai.m31-agent');
+        return extension?.packageJSON?.version || '0.0.0';
     }
 
-    private async getUserId(): Promise<string> {
-        const context = vscode.extensions.getExtension('m31-agent')?.extensionContext;
-        if (!context) {
-            return uuidv4();
+    private getUserId(): string {
+        const storedUserId = this.getStoredUserId();
+        if (storedUserId) {
+            return storedUserId;
         }
-
-        const userId = context.globalState.get<string>('m31-agent.userId');
-        if (userId) {
-            return userId;
-        }
-
+        
         const newUserId = uuidv4();
-        await context.globalState.update('m31-agent.userId', newUserId);
+        this.storeUserId(newUserId);
         return newUserId;
     }
 
-    private getUserIdForLogging(): string {
-        return this.userId ? `${this.userId.substring(0, 8)}...` : 'unknown';
+    private getStoredUserId(): string | undefined {
+        try {
+            const globalState = this.getGlobalState();
+            return globalState?.get<string>('m31-agent.telemetry.userId');
+        } catch (error) {
+            this.loggingService.error('Failed to get stored user ID', error);
+            return undefined;
+        }
+    }
+
+    private storeUserId(userId: string): void {
+        try {
+            const globalState = this.getGlobalState();
+            globalState?.update('m31-agent.telemetry.userId', userId);
+        } catch (error) {
+            this.loggingService.error('Failed to store user ID', error);
+        }
+    }
+
+    private getGlobalState(): vscode.Memento | undefined {
+        const extension = vscode.extensions.getExtension('m31-ai.m31-agent');
+        return extension?.exports?.globalState;
     }
 
     public trackEvent(
         eventName: string,
-        properties?: Record<string, string>,
-        measurements?: Record<string, number>
+        properties: Record<string, string> = {},
+        measurements: Record<string, number> = {}
     ): void {
-        if (!this.isEnabled) {
+        if (!this.telemetryEnabled) {
             return;
         }
 
-        try {
-            // Basic event data
-            const eventData = {
-                eventName,
-                timestamp: new Date().toISOString(),
-                sessionId: this.sessionId,
-                userId: this.userId,
-                properties: properties || {},
-                measurements: measurements || {},
-                // System info (non-identifying)
-                system: {
-                    platform: process.platform,
-                    arch: process.arch,
-                    nodeVersion: process.version,
-                    osRelease: os.release(),
-                    memoryMB: Math.round(os.totalmem() / (1024 * 1024)),
-                    cpuCores: os.cpus().length
-                },
-                // VS Code info
-                vsCode: {
-                    version: vscode.version,
-                    isRemote: !!vscode.env.remoteName,
-                    remoteName: vscode.env.remoteName,
-                    uiKind: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
-                    language: vscode.env.language
-                },
-                // Extension info
-                extension: {
-                    version: vscode.extensions.getExtension('m31-agent')?.packageJSON.version || 'unknown'
-                }
-            };
+        const eventProperties = {
+            ...properties,
+            sessionId: this.sessionId,
+            extensionVersion: this.extensionVersion
+        };
 
-            // In real implementation, send to telemetry service
-            this.logEvent(eventData);
-        } catch (error) {
-            this.loggingService?.error('Failed to track telemetry event', error);
-        }
+        this.loggingService.debug(`Telemetry event: ${eventName}`, {
+            properties: eventProperties,
+            measurements
+        });
+
+        // In a production extension, you would send this data to your telemetry service
+        // This implementation just logs the events
     }
 
-    private logEvent(eventData: any): void {
-        this.loggingService?.debug(`TELEMETRY: ${eventData.eventName}`, eventData);
+    public setTelemetryEnabled(enabled: boolean): void {
+        this.telemetryEnabled = enabled;
+        this.configService.setEnableTelemetry(enabled);
+    }
+
+    public isTelemetryEnabled(): boolean {
+        return this.telemetryEnabled;
+    }
+
+    public getSessionId(): string {
+        return this.sessionId;
     }
 
     public dispose(): void {
-        this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
+        TelemetryService.instance = undefined as any;
     }
 } 

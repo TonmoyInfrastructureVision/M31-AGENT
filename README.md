@@ -1,62 +1,94 @@
-# M31 Agent
+# M31-Agent: AI-Powered Coding Assistant
 
-M31 Agent is an AI-powered coding assistant for VS Code that integrates with OpenRouter AI's API to provide intelligent coding assistance, explanations, and more.
+## Overview
+
+M31-Agent is a powerful AI coding assistant for VS Code that helps developers write, understand, and navigate code more efficiently. Powered by OpenRouter AI, this extension brings natural language understanding to your coding workflow, allowing you to chat with an AI assistant directly from your editor.
 
 ## Features
 
-- **AI-Powered Chat**: Interact with AI models like GPT-4, Claude, and Gemini directly within VS Code
-- **Code Explanations**: Get explanations for selected code snippets
-- **Code Generation**: Generate code based on natural language descriptions
-- **Terminal Integration**: Execute terminal commands with AI assistance
-- **Multi-Language Support**: Works with TypeScript, JavaScript, Python, Java, C/C++, Go, Ruby, PHP, Rust, Swift, Kotlin, and more
-- **Context-Aware**: Understands your codebase for more relevant assistance
+- **AI Chat**: Engage in natural language conversations with the AI about your code and programming problems
+- **Code Generation**: Generate code snippets or complete functions based on natural language descriptions
+- **Code Explanation**: Select any code and get a detailed explanation of what it does
+- **Terminal Commands**: Run or generate terminal commands using natural language
+- **Codebase Navigation**: Easily find relevant files and understand project structure
+- **Multi-Language Support**: Works with all major programming languages including JavaScript, TypeScript, Python, Java, C/C++, C#, Go, Ruby, PHP, Rust, and more
 
-## Getting Started
+## Installation
 
-1. Install the extension from the VS Code Marketplace
-2. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run `M31 Agent: Configure Settings`
-3. Enter your OpenRouter API key (get one at [OpenRouter.ai](https://openrouter.ai))
-4. Access the chat panel by clicking the M31 Agent icon in the status bar or using the command palette
+You can install M31-Agent directly from the VS Code Marketplace:
 
-## Commands
+1. Open VS Code
+2. Go to Extensions view (Ctrl+Shift+X / Cmd+Shift+X)
+3. Search for "M31-Agent"
+4. Click Install
 
-- `M31 Agent: Show Chat` - Open the chat panel
-- `M31 Agent: Configure Settings` - Configure extension settings
-- `M31 Agent: Quick Chat` (`Ctrl+Alt+M` / `Cmd+Alt+M`) - Quick access to chat
-- `M31 Agent: Explain Code` (`Ctrl+Alt+E` / `Cmd+Alt+E`) - Explain selected code
-- `M31 Agent: Generate Code` - Generate code based on a description
-- `M31 Agent: Run Command` - Run a terminal command with AI assistance
-- `M31 Agent: Navigate Codebase` - Get help navigating the codebase
+## Quick Start
 
-## Requirements
+1. **Get an OpenRouter API Key**:
+   - Sign up at [openrouter.ai](https://openrouter.ai/)
+   - Generate an API key from your account dashboard
 
-- VS Code 1.80.0 or higher
-- An API key from [OpenRouter.ai](https://openrouter.ai)
-- Internet connection
+2. **Configure the Extension**:
+   - Open the command palette (Ctrl+Shift+P / Cmd+Shift+P)
+   - Run the command "M31-Agent: Configure Settings"
+   - Enter your API key when prompted
 
-## Extension Settings
+3. **Start using M31-Agent**:
+   - Click the M31-Agent icon in the status bar, or
+   - Use the keyboard shortcut (Ctrl+Alt+M / Cmd+Alt+M), or
+   - Open the command palette and run "M31-Agent: Show Chat"
 
-- `m31-agent.modelId`: AI model to use (default: "openai/gpt-4o")
-- `m31-agent.maxTokens`: Maximum tokens for responses (default: 1024)
-- `m31-agent.temperature`: Temperature for generation (default: 0.7)
-- `m31-agent.requireConfirmation`: Require confirmation before executing commands (default: true)
-- `m31-agent.enableTelemetry`: Enable telemetry (default: true)
-- `m31-agent.logLevel`: Log level (default: "info")
+## Key Commands
+
+- **M31-Agent: Show Chat** - Open the AI chat panel
+- **M31-Agent: Generate Code** - Generate code based on a description
+- **M31-Agent: Explain Code** - Explain the selected code
+- **M31-Agent: Run Command** - Execute or generate a terminal command
+- **M31-Agent: Navigate Codebase** - Find and navigate to files in your project
+- **M31-Agent: Configure Settings** - Configure the extension settings
+
+## Usage Examples
+
+### Generate Code
+```
+> Generate a React component that displays a list of users with pagination
+```
+
+### Explain Code
+Select a piece of code and run the "M31-Agent: Explain Code" command to get a detailed explanation of what the code does.
+
+### Run Terminal Commands
+```
+> Run a command to find all JavaScript files modified in the last 7 days
+```
+
+### Navigate Codebase
+```
+> Find files related to user authentication
+```
+
+## Configuration Options
+
+- **API Key**: Your OpenRouter API key
+- **AI Model**: Select from various available models (GPT-4, Claude, etc.)
+- **Max Tokens**: Maximum response length
+- **Temperature**: Controls randomness of responses (0.0-1.0)
+- **Require Confirmation**: Prompt for confirmation before running commands
+- **Telemetry**: Enable/disable anonymous usage data collection
 
 ## Privacy & Security
 
-This extension requires an API key to function. Your API key is stored securely in VS Code's secret storage and is never shared. The extension communicates directly with the OpenRouter API. Code snippets and commands are sent to the API only when you explicitly interact with the extension.
+- Your code is only sent to the AI service when you explicitly request assistance
+- API keys are stored securely in VS Code's secret storage
+- All API communication is encrypted with TLS
+- You must confirm before any file modifications or terminal commands are executed
+
+## Feedback & Support
+
+- [GitHub Issue Tracker](https://github.com/m31-ai/m31-agent-vscode/issues)
+- [Documentation](https://github.com/m31-ai/m31-agent-vscode/wiki)
+- Email: support@m31-ai.com
 
 ## License
 
-MIT
-
-## Acknowledgements
-
-- OpenRouter AI for providing the API
-- The VS Code team for the excellent extension API
-- The open-source community for inspiration and libraries
-
-## Support
-
-If you encounter any issues or have feature requests, please submit them on our [GitHub repository](https://github.com/m31-ai/m31-agent-vscode/issues). 
+MIT - See LICENSE file for details 

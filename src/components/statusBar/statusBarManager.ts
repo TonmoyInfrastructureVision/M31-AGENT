@@ -1,111 +1,103 @@
 import * as vscode from 'vscode';
 import { ExtensionContext } from '../../models/context/extensionContext';
-import { AuthenticationService } from '../../services/authentication/authenticationService';
 
-export class StatusBarManager implements vscode.Disposable {
+enum StatusBarState {
+    Default = 'default',
+    Loading = 'loading',
+    Error = 'error',
+    Active = 'active',
+    Inactive = 'inactive'
+}
+
+export class StatusBarManager {
     private statusBarItem: vscode.StatusBarItem;
+    private state: StatusBarState = StatusBarState.Default;
+    private loadingAnimation: string[] = ['◐', '◓', '◑', '◒'];
+    private loadingInterval: NodeJS.Timeout | undefined;
+    private loadingFrame: number = 0;
     private context: ExtensionContext;
-    private authService: AuthenticationService | undefined;
-    private disposables: vscode.Disposable[] = [];
 
     constructor(context: ExtensionContext) {
         this.context = context;
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
         this.statusBarItem.name = 'M31 Agent';
         this.statusBarItem.command = 'm31-agent.showChat';
-        this.statusBarItem.tooltip = 'Open M31 Agent Chat';
-        this.disposables.push(this.statusBarItem);
+        this.setDefaultState();
     }
 
     public initialize(): void {
-        this.authService = AuthenticationService.getInstance();
-        this.updateStatusBar();
-
-        // Listen for authentication changes
-        if (this.authService) {
-            const authDisposable = this.context.authenticationService.onAuthStatusChanged(() => {
-                this.updateStatusBar();
-            });
-            this.disposables.push(authDisposable);
-        }
-
-        // Listen for configuration changes
-        const configDisposable = this.context.configurationService.onConfigurationChanged(e => {
-            if (e.affectsConfiguration('m31-agent.modelId')) {
-                this.updateStatusBar();
-            }
-        });
-        this.disposables.push(configDisposable);
-
+        this.context.registerDisposable(this.statusBarItem);
         this.statusBarItem.show();
+        this.context.loggingService.debug('Status bar initialized');
     }
 
-    private updateStatusBar(): void {
-        const hasApiKey = this.authService?.hasApiKey() ?? false;
-        const model = this.context.configurationService.getModelId().split('/').pop() || 'unknown';
-
-        if (hasApiKey) {
-            this.statusBarItem.text = `$(hubot) M31 Agent (${model})`;
-            this.statusBarItem.tooltip = `M31 Agent - Model: ${model} - Click to open chat`;
-            this.statusBarItem.backgroundColor = undefined;
-        } else {
-            this.statusBarItem.text = `$(warning) M31 Agent`;
-            this.statusBarItem.tooltip = 'M31 Agent - API key not configured. Click to configure.';
-            this.statusBarItem.command = 'm31-agent.configureSettings';
-            this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-        }
+    public setDefaultState(): void {
+        this.state = StatusBarState.Default;
+        this.stopLoadingAnimation();
+        this.statusBarItem.text = '$(rocket) M31 Agent';
+        this.statusBarItem.tooltip = 'M31 Agent - Click to open chat';
+        this.context.loggingService.debug('Status bar state set to default');
     }
 
-    public showMessage(message: string, timeout: number = 5000): void {
-        const originalText = this.statusBarItem.text;
-        const originalTooltip = this.statusBarItem.tooltip;
-        const originalCommand = this.statusBarItem.command;
-
-        this.statusBarItem.text = `$(info) ${message}`;
+    public setLoadingState(message: string = 'Processing'): void {
+        this.state = StatusBarState.Loading;
         this.statusBarItem.tooltip = message;
-        this.statusBarItem.command = undefined;
-
-        setTimeout(() => {
-            this.statusBarItem.text = originalText;
-            this.statusBarItem.tooltip = originalTooltip;
-            this.statusBarItem.command = originalCommand;
-        }, timeout);
+        this.startLoadingAnimation(message);
+        this.context.loggingService.debug('Status bar state set to loading');
     }
 
-    /**
-     * Shows a busy indicator in the status bar
-     */
-    public showBusy(message: string): void {
-        this.statusBarItem.text = `$(sync~spin) M31 Agent: ${message}`;
-        this.statusBarItem.tooltip = `Working: ${message}...`;
-        this.statusBarItem.command = undefined;
-        this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-    }
-
-    /**
-     * Shows a ready state in the status bar
-     */
-    public showReady(): void {
-        this.updateStatusBar();
-    }
-
-    /**
-     * Shows an error state in the status bar
-     */
-    public showError(message: string): void {
-        this.statusBarItem.text = `$(error) M31 Agent: ${message}`;
+    public setErrorState(message: string): void {
+        this.state = StatusBarState.Error;
+        this.stopLoadingAnimation();
+        this.statusBarItem.text = '$(error) M31 Agent';
         this.statusBarItem.tooltip = `Error: ${message}`;
-        this.statusBarItem.command = 'm31-agent.configureSettings';
-        this.statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+        this.context.loggingService.debug('Status bar state set to error');
         
-        // Reset to normal state after a delay
+        // Automatically reset to default state after 5 seconds
         setTimeout(() => {
-            this.updateStatusBar();
+            if (this.state === StatusBarState.Error) {
+                this.setDefaultState();
+            }
         }, 5000);
     }
 
+    public setActiveState(message: string = 'Active'): void {
+        this.state = StatusBarState.Active;
+        this.stopLoadingAnimation();
+        this.statusBarItem.text = '$(check) M31 Agent';
+        this.statusBarItem.tooltip = message;
+        this.context.loggingService.debug('Status bar state set to active');
+    }
+
+    public setInactiveState(message: string = 'Inactive'): void {
+        this.state = StatusBarState.Inactive;
+        this.stopLoadingAnimation();
+        this.statusBarItem.text = '$(circle-slash) M31 Agent';
+        this.statusBarItem.tooltip = message;
+        this.context.loggingService.debug('Status bar state set to inactive');
+    }
+
+    private startLoadingAnimation(message: string): void {
+        this.stopLoadingAnimation();
+        this.loadingFrame = 0;
+        
+        this.loadingInterval = setInterval(() => {
+            this.loadingFrame = (this.loadingFrame + 1) % this.loadingAnimation.length;
+            const frame = this.loadingAnimation[this.loadingFrame];
+            this.statusBarItem.text = `$(sync~spin) M31 Agent`;
+            this.statusBarItem.tooltip = `${message}...`;
+        }, 250);
+    }
+
+    private stopLoadingAnimation(): void {
+        if (this.loadingInterval) {
+            clearInterval(this.loadingInterval);
+            this.loadingInterval = undefined;
+        }
+    }
+
     public dispose(): void {
-        this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
+        this.stopLoadingAnimation();
+        this.statusBarItem.dispose();
     }
 } 

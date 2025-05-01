@@ -1,588 +1,619 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { v4 as uuidv4 } from 'uuid';
 import { ExtensionContext } from '../../models/context/extensionContext';
-import { OpenRouterApiClient, AIMessage } from '../../api/client/openRouterApiClient';
-import { AIRequestType } from '../../models/ai/aiRequestType';
-import { FileSystemService } from '../../services/fileSystem/fileSystemService';
-import { CodeAnalysisService } from '../../services/codeAnalysis/codeAnalysisService';
+import { ChatMessage, ChatRole, ChatSession } from '../../models/ai/chatTypes';
+import { OpenRouterApiClient } from '../../api/client/openRouterApiClient';
 
-export class ChatPanelProvider implements vscode.Disposable {
-    private static instance: ChatPanelProvider;
-    private context: ExtensionContext;
+export class ChatPanelProvider {
     private panel: vscode.WebviewPanel | undefined;
-    private messages: AIMessage[] = [];
-    private disposables: vscode.Disposable[] = [];
-    private apiClient: OpenRouterApiClient | undefined;
-    private fileSystemService: FileSystemService | undefined;
-    private codeAnalysisService: CodeAnalysisService | undefined;
+    private context: ExtensionContext;
+    private sessions: ChatSession[] = [];
+    private activeSessionId: string | null = null;
+    private apiClient: OpenRouterApiClient;
+    private static readonly viewType = 'm31-agent.chatView';
     private isProcessing: boolean = false;
 
     constructor(context: ExtensionContext) {
         this.context = context;
-        ChatPanelProvider.instance = this;
-
-        // Get required services
-        this.apiClient = OpenRouterApiClient.getInstance();
-        this.fileSystemService = FileSystemService.getInstance();
-        this.codeAnalysisService = CodeAnalysisService.getInstance();
+        this.apiClient = new OpenRouterApiClient(
+            context.configurationService,
+            context.authenticationService,
+            context.loggingService
+        );
+        this.loadSessions();
+        
+        // Create default session if none exists
+        if (this.sessions.length === 0) {
+            this.createNewSession();
+        } else {
+            this.activeSessionId = this.sessions[0].id;
+        }
     }
 
-    public static getInstance(): ChatPanelProvider {
-        return ChatPanelProvider.instance;
-    }
-
-    public show(): void {
+    public async show(): Promise<void> {
         if (this.panel) {
             this.panel.reveal();
             return;
         }
 
-        // Create a new webview panel
         this.panel = vscode.window.createWebviewPanel(
-            'm31-agent-chat',
+            ChatPanelProvider.viewType,
             'M31 Agent Chat',
             vscode.ViewColumn.Beside,
             {
                 enableScripts: true,
                 retainContextWhenHidden: true,
                 localResourceRoots: [
-                    vscode.Uri.file(path.join(this.context.extensionPath, 'webview', 'dist'))
+                    vscode.Uri.file(path.join(this.context.extensionPath, 'resources'))
                 ]
             }
         );
 
-        // Set the webview's initial html content
+        this.panel.iconPath = {
+            light: vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'light', 'chat.svg')),
+            dark: vscode.Uri.file(path.join(this.context.extensionPath, 'resources', 'dark', 'chat.svg'))
+        };
+
         this.panel.webview.html = this.getWebviewContent();
 
-        // Handle messages from the webview
         this.panel.webview.onDidReceiveMessage(
             async (message) => {
-                switch (message.command) {
-                    case 'sendMessage':
-                        await this.handleChatMessage(message.text);
-                        break;
-                    case 'clearChat':
-                        this.clearChat();
-                        break;
-                    case 'insertCode':
-                        this.insertCodeToEditor(message.code);
-                        break;
-                    case 'copyToClipboard':
-                        vscode.env.clipboard.writeText(message.text);
-                        this.postMessage({ command: 'notification', text: 'Copied to clipboard' });
-                        break;
-                }
+                await this.handleWebviewMessage(message);
             },
             undefined,
-            this.disposables
+            this.context.subscriptions
         );
 
-        // Reset when the panel is disposed
         this.panel.onDidDispose(
             () => {
                 this.panel = undefined;
             },
             null,
-            this.disposables
+            this.context.subscriptions
         );
 
-        // Initialize with system message
-        this.initializeChat();
-    }
-
-    private initializeChat(): void {
-        this.messages = [
-            {
-                role: 'system',
-                content: `You are M31-Agent, an advanced AI coding assistant for VS Code. Your task is to help users with coding tasks, answer programming questions, 
-and provide assistance with software development. Be concise yet thorough, and always provide practical, high-quality code examples when appropriate.
-Current VS Code version: ${vscode.version}
-Current workspace: ${this.getWorkspaceInfo()}`
-            }
-        ];
-
-        this.postMessage({
-            command: 'initialize',
-            messages: this.messages.filter(m => m.role !== 'system'),
-            isProcessing: this.isProcessing
-        });
-    }
-
-    private getWorkspaceInfo(): string {
-        if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
-            return 'No workspace folder open';
-        }
-        
-        return vscode.workspace.workspaceFolders.map(folder => folder.name).join(', ');
+        // Send initial state to webview
+        await this.updateWebview();
     }
 
     private getWebviewContent(): string {
         return `<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>M31 Agent Chat</title>
-            <style>
-                body {
-                    font-family: var(--vscode-font-family);
-                    padding: 0;
-                    margin: 0;
-                    color: var(--vscode-editor-foreground);
-                    background-color: var(--vscode-editor-background);
-                    display: flex;
-                    flex-direction: column;
-                    height: 100vh;
-                }
-                .chat-container {
-                    flex: 1;
-                    overflow-y: auto;
-                    padding: 16px;
-                }
-                .message {
-                    margin-bottom: 16px;
-                    display: flex;
-                    flex-direction: column;
-                }
-                .message-content {
-                    padding: 8px 12px;
-                    border-radius: 8px;
-                    max-width: 80%;
-                    overflow-wrap: break-word;
-                }
-                .user-message {
-                    align-self: flex-end;
-                }
-                .user-message .message-content {
-                    background-color: var(--vscode-button-background);
-                    color: var(--vscode-button-foreground);
-                }
-                .assistant-message {
-                    align-self: flex-start;
-                }
-                .assistant-message .message-content {
-                    background-color: var(--vscode-editor-inactiveSelectionBackground);
-                }
-                pre {
-                    background-color: var(--vscode-textCodeBlock-background);
-                    padding: 8px;
-                    border-radius: 4px;
-                    overflow-x: auto;
-                }
-                code {
-                    font-family: var(--vscode-editor-font-family);
-                    font-size: var(--vscode-editor-font-size);
-                }
-                .input-container {
-                    display: flex;
-                    padding: 16px;
-                    border-top: 1px solid var(--vscode-panel-border);
-                }
-                #message-input {
-                    flex: 1;
-                    padding: 8px;
-                    border: 1px solid var(--vscode-input-border);
-                    background-color: var(--vscode-input-background);
-                    color: var(--vscode-input-foreground);
-                    border-radius: 4px;
-                    resize: none;
-                    min-height: 40px;
-                    max-height: 200px;
-                }
-                #send-button {
-                    margin-left: 8px;
-                    background-color: var(--vscode-button-background);
-                    color: var(--vscode-button-foreground);
-                    border: none;
-                    padding: 0 16px;
-                    cursor: pointer;
-                    border-radius: 4px;
-                }
-                #send-button:disabled {
-                    opacity: 0.5;
-                    cursor: not-allowed;
-                }
-                .loading {
-                    display: inline-block;
-                    width: 16px;
-                    height: 16px;
-                    border: 2px solid rgba(255, 255, 255, 0.3);
-                    border-radius: 50%;
-                    border-top-color: var(--vscode-button-foreground);
-                    animation: spin 1s ease-in-out infinite;
-                }
-                @keyframes spin {
-                    to { transform: rotate(360deg); }
-                }
-                .action-buttons {
-                    margin-top: 8px;
-                    display: flex;
-                    gap: 8px;
-                }
-                .action-button {
-                    background-color: transparent;
-                    color: var(--vscode-button-foreground);
-                    border: 1px solid var(--vscode-button-background);
-                    padding: 4px 8px;
-                    font-size: 12px;
-                    cursor: pointer;
-                    border-radius: 4px;
-                }
-                .clear-button {
-                    background-color: transparent;
-                    color: var(--vscode-errorForeground);
-                    border: 1px solid var(--vscode-errorForeground);
-                    margin-left: auto;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="chat-container" id="chat-container"></div>
-            <div class="input-container">
-                <textarea id="message-input" placeholder="Type your message..." rows="1"></textarea>
-                <button id="send-button">Send</button>
-            </div>
-
-            <script>
-                (function() {
-                    const vscode = acquireVsCodeApi();
-                    let isProcessing = false;
-                    
-                    // Handle messages from extension
-                    window.addEventListener('message', event => {
-                        const message = event.data;
-                        
-                        switch (message.command) {
-                            case 'initialize':
-                                document.getElementById('chat-container').innerHTML = '';
-                                message.messages.forEach(msg => addMessage(msg.role, msg.content));
-                                isProcessing = message.isProcessing;
-                                updateSendButton();
-                                break;
-                                
-                            case 'newMessage':
-                                addMessage(message.role, message.content);
-                                scrollToBottom();
-                                break;
-                                
-                            case 'updateMessage':
-                                updateLastMessage(message.content);
-                                scrollToBottom();
-                                break;
-                                
-                            case 'processingStarted':
-                                isProcessing = true;
-                                updateSendButton();
-                                break;
-                                
-                            case 'processingEnded':
-                                isProcessing = false;
-                                updateSendButton();
-                                scrollToBottom();
-                                break;
-                                
-                            case 'notification':
-                                showNotification(message.text);
-                                break;
-                        }
-                    });
-                    
-                    // Add a message to the chat
-                    function addMessage(role, content) {
-                        const chatContainer = document.getElementById('chat-container');
-                        const messageDiv = document.createElement('div');
-                        messageDiv.className = \`message \${role}-message\`;
-                        
-                        const contentDiv = document.createElement('div');
-                        contentDiv.className = 'message-content';
-                        
-                        // Process markdown-like content
-                        content = processMarkdown(content);
-                        contentDiv.innerHTML = content;
-                        
-                        messageDiv.appendChild(contentDiv);
-                        
-                        // Add action buttons for assistant messages
-                        if (role === 'assistant') {
-                            const buttonsDiv = document.createElement('div');
-                            buttonsDiv.className = 'action-buttons';
-                            
-                            const copyButton = document.createElement('button');
-                            copyButton.className = 'action-button';
-                            copyButton.textContent = \`Copy\`;
-                            copyButton.onclick = () => {
-                                vscode.postMessage({
-                                    command: 'copyToClipboard',
-                                    text: stripHtml(content)
-                                });
-                            };
-                            
-                            buttonsDiv.appendChild(copyButton);
-                            
-                            // Add buttons to copy or insert code for each code block
-                            const codeBlocks = contentDiv.querySelectorAll('pre code');
-                            if (codeBlocks.length > 0) {
-                                codeBlocks.forEach((codeBlock, index) => {
-                                    const code = codeBlock.textContent;
-                                    
-                                    const insertButton = document.createElement('button');
-                                    insertButton.className = 'action-button';
-                                    insertButton.textContent = \`Insert Code \${codeBlocks.length > 1 ? (index + 1) : ''}\`;
-                                    insertButton.onclick = () => {
-                                        vscode.postMessage({
-                                            command: 'insertCode',
-                                            code: code
-                                        });
-                                    };
-                                    
-                                    buttonsDiv.appendChild(insertButton);
-                                });
-                            }
-                            
-                            messageDiv.appendChild(buttonsDiv);
-                        }
-                        
-                        chatContainer.appendChild(messageDiv);
-                        scrollToBottom();
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>M31 Agent Chat</title>
+                <style>
+                    body {
+                        font-family: var(--vscode-font-family);
+                        color: var(--vscode-editor-foreground);
+                        background-color: var(--vscode-editor-background);
+                        padding: 0;
+                        margin: 0;
+                        width: 100vw;
+                        height: 100vh;
+                        display: flex;
+                        flex-direction: column;
                     }
-                    
-                    // Update the content of the last assistant message
-                    function updateLastMessage(content) {
-                        const messages = document.querySelectorAll('.assistant-message');
-                        if (messages.length > 0) {
-                            const lastMessage = messages[messages.length - 1];
-                            const contentDiv = lastMessage.querySelector('.message-content');
-                            
-                            // Process markdown-like content
-                            content = processMarkdown(content);
-                            contentDiv.innerHTML = content;
-                        }
+                    .chat-container {
+                        display: flex;
+                        flex-direction: column;
+                        height: 100%;
+                        overflow: hidden;
                     }
-                    
-                    // Process markdown-like syntax in messages
-                    function processMarkdown(text) {
-                        // Handle code blocks
-                        text = text.replace(/\`\`\`(\\w*)\n([\\s\\S]*?)\`\`\`/g, '<pre><code>$2</code></pre>');
-                        
-                        // Handle inline code
-                        text = text.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
-                        
-                        // Handle bold text
-                        text = text.replace(/\\*\\*([^\\*]+)\\*\\*/g, '<strong>$1</strong>');
-                        
-                        // Handle italic text
-                        text = text.replace(/\\*([^\\*]+)\\*/g, '<em>$1</em>');
-                        
-                        // Handle line breaks
-                        text = text.replace(/\\n/g, '<br>');
-                        
-                        return text;
+                    .messages-container {
+                        flex: 1;
+                        overflow-y: auto;
+                        padding: 1rem;
                     }
-                    
-                    // Strip HTML tags for clipboard
-                    function stripHtml(html) {
-                        const temp = document.createElement('div');
-                        temp.innerHTML = html;
-                        return temp.textContent || temp.innerText || '';
+                    .message {
+                        margin-bottom: 1rem;
+                        padding: 0.5rem 1rem;
+                        border-radius: 0.5rem;
+                        max-width: 85%;
                     }
-                    
-                    // Scroll to the bottom of the chat
-                    function scrollToBottom() {
-                        const chatContainer = document.getElementById('chat-container');
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    .user-message {
+                        align-self: flex-end;
+                        background-color: var(--vscode-button-background);
+                        color: var(--vscode-button-foreground);
+                        margin-left: auto;
                     }
-                    
-                    // Update the send button state
-                    function updateSendButton() {
+                    .assistant-message {
+                        align-self: flex-start;
+                        background-color: var(--vscode-editor-inactiveSelectionBackground);
+                        color: var(--vscode-editor-foreground);
+                    }
+                    .system-message {
+                        align-self: center;
+                        background-color: var(--vscode-banner-background);
+                        color: var(--vscode-banner-foreground);
+                        font-style: italic;
+                        text-align: center;
+                        max-width: 90%;
+                    }
+                    .input-container {
+                        display: flex;
+                        padding: 1rem;
+                        border-top: 1px solid var(--vscode-panel-border);
+                    }
+                    #message-input {
+                        flex: 1;
+                        padding: 0.5rem;
+                        resize: none;
+                        height: 2.5rem;
+                        max-height: 10rem;
+                        background-color: var(--vscode-input-background);
+                        color: var(--vscode-input-foreground);
+                        border: 1px solid var(--vscode-input-border);
+                        border-radius: 0.25rem;
+                        font-family: var(--vscode-font-family);
+                    }
+                    #send-button {
+                        margin-left: 0.5rem;
+                        padding: 0.5rem 1rem;
+                        background-color: var(--vscode-button-background);
+                        color: var(--vscode-button-foreground);
+                        border: none;
+                        border-radius: 0.25rem;
+                        cursor: pointer;
+                    }
+                    #send-button:disabled {
+                        opacity: 0.5;
+                        cursor: not-allowed;
+                    }
+                    .toolbar {
+                        display: flex;
+                        padding: 0.5rem 1rem;
+                        background-color: var(--vscode-panel-background);
+                        border-bottom: 1px solid var(--vscode-panel-border);
+                    }
+                    .toolbar button {
+                        margin-right: 0.5rem;
+                        padding: 0.25rem 0.5rem;
+                        background-color: var(--vscode-button-secondaryBackground);
+                        color: var(--vscode-button-secondaryForeground);
+                        border: none;
+                        border-radius: 0.25rem;
+                        cursor: pointer;
+                    }
+                    .loading {
+                        text-align: center;
+                        padding: 1rem;
+                        font-style: italic;
+                        color: var(--vscode-descriptionForeground);
+                    }
+                    pre {
+                        background-color: var(--vscode-textCodeBlock-background);
+                        padding: 1rem;
+                        border-radius: 0.5rem;
+                        overflow-x: auto;
+                        margin: 0.5rem 0;
+                    }
+                    code {
+                        font-family: var(--vscode-editor-font-family);
+                        font-size: var(--vscode-editor-font-size);
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="chat-container">
+                    <div class="toolbar">
+                        <button id="new-chat-button">New Chat</button>
+                        <button id="clear-chat-button">Clear Chat</button>
+                        <button id="export-chat-button">Export Chat</button>
+                    </div>
+                    <div class="messages-container" id="messages-container"></div>
+                    <div class="input-container">
+                        <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
+                        <button id="send-button">Send</button>
+                    </div>
+                </div>
+                <script>
+                    (function() {
+                        const vscode = acquireVsCodeApi();
+                        const messagesContainer = document.getElementById('messages-container');
+                        const messageInput = document.getElementById('message-input');
                         const sendButton = document.getElementById('send-button');
-                        const messageInput = document.getElementById('message-input');
+                        const newChatButton = document.getElementById('new-chat-button');
+                        const clearChatButton = document.getElementById('clear-chat-button');
+                        const exportChatButton = document.getElementById('export-chat-button');
                         
-                        if (isProcessing) {
-                            sendButton.innerHTML = '<div class="loading"></div>';
-                            sendButton.disabled = true;
-                            messageInput.disabled = true;
-                        } else {
-                            sendButton.innerHTML = 'Send';
-                            sendButton.disabled = false;
-                            messageInput.disabled = false;
-                            messageInput.focus();
-                        }
-                    }
-                    
-                    // Show a notification
-                    function showNotification(text) {
-                        // In a real implementation, this would show a toast notification
-                        console.log('Notification:', text);
-                    }
-                    
-                    // Handle the send button click
-                    document.getElementById('send-button').addEventListener('click', () => {
-                        sendMessage();
-                    });
-                    
-                    // Handle pressing Enter in the input field
-                    document.getElementById('message-input').addEventListener('keydown', (e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            sendMessage();
-                        }
-                    });
-                    
-                    // Send a message to the extension
-                    function sendMessage() {
-                        if (isProcessing) return;
+                        let isProcessing = false;
                         
-                        const messageInput = document.getElementById('message-input');
-                        const text = messageInput.value.trim();
-                        
-                        if (text) {
+                        // Handle sending messages
+                        function sendMessage() {
+                            const message = messageInput.value.trim();
+                            if (!message || isProcessing) return;
+                            
                             vscode.postMessage({
                                 command: 'sendMessage',
-                                text: text
+                                text: message
                             });
                             
                             messageInput.value = '';
+                            messageInput.style.height = 'auto';
                         }
-                    }
-                    
-                    // Auto-resize textarea
-                    const messageInput = document.getElementById('message-input');
-                    messageInput.addEventListener('input', () => {
-                        messageInput.style.height = 'auto';
-                        messageInput.style.height = messageInput.scrollHeight + 'px';
-                    });
-                    
-                    // Initialize with an empty chat
-                    vscode.postMessage({
-                        command: 'ready'
-                    });
-                })();
-            </script>
-        </body>
-        </html>`;
+                        
+                        // Event listeners
+                        sendButton.addEventListener('click', sendMessage);
+                        
+                        messageInput.addEventListener('keydown', (event) => {
+                            if (event.key === 'Enter' && !event.shiftKey) {
+                                event.preventDefault();
+                                sendMessage();
+                            }
+                        });
+                        
+                        messageInput.addEventListener('input', () => {
+                            messageInput.style.height = 'auto';
+                            messageInput.style.height = messageInput.scrollHeight + 'px';
+                        });
+                        
+                        newChatButton.addEventListener('click', () => {
+                            vscode.postMessage({ command: 'newChat' });
+                        });
+                        
+                        clearChatButton.addEventListener('click', () => {
+                            vscode.postMessage({ command: 'clearChat' });
+                        });
+                        
+                        exportChatButton.addEventListener('click', () => {
+                            vscode.postMessage({ command: 'exportChat' });
+                        });
+                        
+                        // Listen for messages from the extension
+                        window.addEventListener('message', (event) => {
+                            const message = event.data;
+                            
+                            switch (message.command) {
+                                case 'updateChat':
+                                    updateChatMessages(message.messages);
+                                    break;
+                                case 'setProcessing':
+                                    setProcessingState(message.isProcessing);
+                                    break;
+                            }
+                        });
+                        
+                        // Display chat messages
+                        function updateChatMessages(messages) {
+                            messagesContainer.innerHTML = '';
+                            
+                            messages.forEach(msg => {
+                                const messageElement = document.createElement('div');
+                                messageElement.classList.add('message');
+                                
+                                switch (msg.role) {
+                                    case 'user':
+                                        messageElement.classList.add('user-message');
+                                        break;
+                                    case 'assistant':
+                                        messageElement.classList.add('assistant-message');
+                                        break;
+                                    case 'system':
+                                        messageElement.classList.add('system-message');
+                                        break;
+                                }
+                                
+                                // Process markdown-like content
+                                let content = msg.content;
+                                
+                                // Handle code blocks
+                                content = content.replace(/\`\`\`(\\w*)(\\n)?([\\s\\S]*?)\\n?\`\`\`/g, (match, lang, newline, code) => {
+                                    return \`<pre><code class="language-\${lang}">\${code}</code></pre>\`;
+                                });
+                                
+                                // Handle inline code
+                                content = content.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+                                
+                                // Handle line breaks
+                                content = content.replace(/\\n/g, '<br>');
+                                
+                                messageElement.innerHTML = content;
+                                messagesContainer.appendChild(messageElement);
+                            });
+                            
+                            // Scroll to bottom
+                            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                        }
+                        
+                        // Update UI processing state
+                        function setProcessingState(processing) {
+                            isProcessing = processing;
+                            sendButton.disabled = processing;
+                            messageInput.disabled = processing;
+                            
+                            if (processing) {
+                                const loadingElement = document.createElement('div');
+                                loadingElement.classList.add('loading');
+                                loadingElement.id = 'loading-indicator';
+                                loadingElement.textContent = 'AI is thinking...';
+                                messagesContainer.appendChild(loadingElement);
+                                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                            } else {
+                                const loadingElement = document.getElementById('loading-indicator');
+                                if (loadingElement) {
+                                    loadingElement.remove();
+                                }
+                            }
+                        }
+                        
+                        // Notify the extension that the webview is ready
+                        vscode.postMessage({ command: 'ready' });
+                    }());
+                </script>
+            </body>
+            </html>`;
     }
 
-    private async handleChatMessage(userMessage: string): Promise<void> {
-        if (!this.apiClient) {
-            vscode.window.showErrorMessage('API client is not initialized');
+    private async handleWebviewMessage(message: any): Promise<void> {
+        switch (message.command) {
+            case 'ready':
+                await this.updateWebview();
+                break;
+            case 'sendMessage':
+                await this.sendMessage(message.text);
+                break;
+            case 'newChat':
+                await this.createNewSession();
+                await this.updateWebview();
+                break;
+            case 'clearChat':
+                await this.clearCurrentSession();
+                await this.updateWebview();
+                break;
+            case 'exportChat':
+                await this.exportCurrentSession();
+                break;
+        }
+    }
+
+    private async updateWebview(): Promise<void> {
+        if (!this.panel) {
+            return;
+        }
+
+        const activeSession = this.getActiveSession();
+        if (!activeSession) {
+            return;
+        }
+
+        this.panel.webview.postMessage({
+            command: 'updateChat',
+            messages: activeSession.messages
+        });
+
+        this.panel.webview.postMessage({
+            command: 'setProcessing',
+            isProcessing: this.isProcessing
+        });
+    }
+
+    public async sendMessage(text: string): Promise<void> {
+        if (!text.trim() || this.isProcessing) {
+            return;
+        }
+
+        const session = this.getActiveSession();
+        if (!session) {
+            this.context.loggingService.error('No active chat session found');
             return;
         }
 
         try {
+            // Add user message
+            const userMessage: ChatMessage = {
+                role: ChatRole.User,
+                content: text,
+                timestamp: Date.now(),
+                id: uuidv4()
+            };
+
+            session.messages.push(userMessage);
+            session.updatedAt = Date.now();
+            await this.updateWebview();
+
+            // Start processing
             this.isProcessing = true;
-            
-            // Add user message to the UI
-            this.messages.push({ role: 'user', content: userMessage });
-            this.postMessage({
-                command: 'newMessage',
-                role: 'user',
-                content: userMessage
+            await this.updateWebview();
+
+            // Ensure API key is set
+            const isAuthenticated = await this.context.authenticationService.ensureAuthenticated();
+            if (!isAuthenticated) {
+                this.addSystemMessage('API key not configured. Please set your OpenRouter API key in the settings.');
+                this.isProcessing = false;
+                await this.updateWebview();
+                return;
+            }
+
+            // Prepare chat completion request
+            const messages = session.messages
+                .filter(m => m.role !== ChatRole.System || session.messages.indexOf(m) === 0)
+                .map(m => ({
+                    role: m.role,
+                    content: m.content
+                }));
+
+            // Add a system message if none exists
+            if (!messages.find(m => m.role === ChatRole.System)) {
+                messages.unshift({
+                    role: ChatRole.System,
+                    content: 'You are M31 Agent, an AI assistant for VS Code. Be concise, helpful, and clear in your responses. Use markdown formatting when appropriate.'
+                });
+            }
+
+            // Get completion from OpenRouter
+            const modelId = session.modelId || this.context.configurationService.getModelId();
+            const response = await this.apiClient.generateChatCompletion(messages, {
+                modelId,
+                temperature: this.context.configurationService.getTemperature(),
+                maxTokens: this.context.configurationService.getMaxTokens()
             });
-            this.postMessage({ command: 'processingStarted' });
 
-            // Get code context if available
-            let contextPrompt = '';
-            if (this.codeAnalysisService) {
-                try {
-                    const codeContext = await this.codeAnalysisService.analyzeCurrentDocument();
-                    if (codeContext.hasSelection) {
-                        contextPrompt = `\n\nSelected code in ${codeContext.fileName}:\n\`\`\`${codeContext.languageId}\n${codeContext.selectedText}\n\`\`\``;
-                    }
-                } catch (error) {
-                    // Not critical, just proceed without code context
-                    this.context.loggingService.warning('Failed to get code context', error);
-                }
-            }
+            // Add assistant response
+            const assistantMessage: ChatMessage = {
+                role: ChatRole.Assistant,
+                content: response.choices[0].message.content,
+                timestamp: Date.now(),
+                id: uuidv4()
+            };
 
-            // Add context to the user message for the API request
-            const messagesWithContext = [...this.messages];
-            if (contextPrompt) {
-                // Update the last message to include the context
-                messagesWithContext[messagesWithContext.length - 1] = {
-                    role: 'user',
-                    content: userMessage + contextPrompt
-                };
-            }
+            session.messages.push(assistantMessage);
+            session.updatedAt = Date.now();
 
-            // Stream the response
-            let assistantMessage = '';
-            
-            this.apiClient.streamRequest(
-                {
-                    requestType: AIRequestType.Chat,
-                    messages: messagesWithContext,
-                    stream: true
-                },
-                (chunk) => {
-                    // Update UI with each chunk
-                    assistantMessage += chunk;
-                    this.postMessage({
-                        command: 'updateMessage',
-                        content: assistantMessage
-                    });
-                },
-                (response) => {
-                    // Complete message
-                    this.messages.push({ role: 'assistant', content: assistantMessage });
-                    this.isProcessing = false;
-                    this.postMessage({ command: 'processingEnded' });
-                    
-                    // Log telemetry
-                    this.context.telemetryService.trackEvent('chat_message_completed', {
-                        messageLength: userMessage.length.toString(),
-                        responseLength: assistantMessage.length.toString()
-                    });
-                },
-                (error) => {
-                    // Handle error
-                    this.isProcessing = false;
-                    this.context.loggingService.error('Error getting AI response', error);
-                    vscode.window.showErrorMessage(`Error: ${error.message}`);
-                    this.postMessage({ command: 'processingEnded' });
-                }
-            );
+            // Save sessions and update UI
+            this.saveSessions();
 
-            // Add empty assistant message that will be updated
-            this.postMessage({
-                command: 'newMessage',
-                role: 'assistant',
-                content: ''
+            // Track the event
+            this.context.telemetryService.trackEvent('chat_message_processed', {
+                modelId,
+                inputTokens: response.usage.prompt_tokens.toString(),
+                outputTokens: response.usage.completion_tokens.toString(),
+                totalTokens: response.usage.total_tokens.toString()
             });
         } catch (error) {
-            this.isProcessing = false;
             this.context.loggingService.error('Error processing chat message', error);
-            vscode.window.showErrorMessage(`Error: ${error instanceof Error ? error.message : String(error)}`);
-            this.postMessage({ command: 'processingEnded' });
+            this.addSystemMessage(`Error: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            this.isProcessing = false;
+            await this.updateWebview();
         }
     }
 
-    private postMessage(message: any): void {
-        if (this.panel) {
-            this.panel.webview.postMessage(message);
-        }
-    }
-
-    private clearChat(): void {
-        this.initializeChat();
-    }
-
-    private insertCodeToEditor(code: string): void {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            vscode.window.showErrorMessage('No active editor found to insert code');
+    private addSystemMessage(content: string): void {
+        const session = this.getActiveSession();
+        if (!session) {
             return;
         }
 
-        editor.edit(editBuilder => {
-            const selection = editor.selection;
-            if (selection.isEmpty) {
-                // Insert at cursor position
-                editBuilder.insert(selection.active, code);
-            } else {
-                // Replace selected text
-                editBuilder.replace(selection, code);
+        const systemMessage: ChatMessage = {
+            role: ChatRole.System,
+            content,
+            timestamp: Date.now(),
+            id: uuidv4()
+        };
+
+        session.messages.push(systemMessage);
+        session.updatedAt = Date.now();
+        this.saveSessions();
+    }
+
+    public async createNewSession(): Promise<string> {
+        const sessionId = uuidv4();
+        const newSession: ChatSession = {
+            id: sessionId,
+            title: `Chat ${this.sessions.length + 1}`,
+            messages: [
+                {
+                    role: ChatRole.System,
+                    content: 'You are M31 Agent, an AI assistant for VS Code. Be concise, helpful, and clear in your responses. Use markdown formatting when appropriate.',
+                    timestamp: Date.now(),
+                    id: uuidv4()
+                }
+            ],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            modelId: this.context.configurationService.getModelId()
+        };
+
+        this.sessions.unshift(newSession);
+        this.activeSessionId = sessionId;
+        this.saveSessions();
+
+        this.context.telemetryService.trackEvent('chat_session_created');
+
+        return sessionId;
+    }
+
+    public async clearCurrentSession(): Promise<void> {
+        const session = this.getActiveSession();
+        if (!session) {
+            return;
+        }
+
+        session.messages = [
+            {
+                role: ChatRole.System,
+                content: 'You are M31 Agent, an AI assistant for VS Code. Be concise, helpful, and clear in your responses. Use markdown formatting when appropriate.',
+                timestamp: Date.now(),
+                id: uuidv4()
             }
-        });
+        ];
+        session.updatedAt = Date.now();
+        
+        this.saveSessions();
+        this.context.telemetryService.trackEvent('chat_session_cleared');
+    }
+
+    public async exportCurrentSession(): Promise<void> {
+        const session = this.getActiveSession();
+        if (!session) {
+            throw new Error('No active session to export');
+        }
+
+        try {
+            const exportData = {
+                title: session.title,
+                modelId: session.modelId || this.context.configurationService.getModelId(),
+                timestamp: new Date().toISOString(),
+                messages: session.messages.map(m => ({
+                    role: m.role,
+                    content: m.content,
+                    timestamp: m.timestamp ? new Date(m.timestamp).toISOString() : undefined
+                }))
+            };
+
+            const jsonString = JSON.stringify(exportData, null, 2);
+            
+            // Save to file
+            const uri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(`${session.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_${new Date().toISOString().replace(/:/g, '-')}.json`),
+                filters: {
+                    'JSON': ['json'],
+                    'All Files': ['*']
+                }
+            });
+
+            if (uri) {
+                await vscode.workspace.fs.writeFile(uri, Buffer.from(jsonString, 'utf8'));
+                this.context.telemetryService.trackEvent('chat_session_exported');
+            }
+        } catch (error) {
+            this.context.loggingService.error('Failed to export chat session', error);
+            throw error;
+        }
+    }
+
+    private getActiveSession(): ChatSession | undefined {
+        if (!this.activeSessionId) {
+            return undefined;
+        }
+        return this.sessions.find(s => s.id === this.activeSessionId);
+    }
+
+    private async loadSessions(): Promise<void> {
+        try {
+            const storedData = this.context.globalState.get<string>('m31-agent.chatSessions');
+            if (storedData) {
+                this.sessions = JSON.parse(storedData);
+                this.context.loggingService.debug(`Loaded ${this.sessions.length} chat sessions`);
+            }
+        } catch (error) {
+            this.context.loggingService.error('Failed to load chat sessions', error);
+            this.sessions = [];
+        }
+    }
+
+    private saveSessions(): void {
+        try {
+            // Limit to the 50 most recent sessions
+            const recentSessions = this.sessions.slice(0, 50);
+            this.context.globalState.update('m31-agent.chatSessions', JSON.stringify(recentSessions));
+            this.context.loggingService.debug(`Saved ${recentSessions.length} chat sessions`);
+        } catch (error) {
+            this.context.loggingService.error('Failed to save chat sessions', error);
+        }
     }
 
     public dispose(): void {
@@ -590,8 +621,5 @@ Current workspace: ${this.getWorkspaceInfo()}`
             this.panel.dispose();
             this.panel = undefined;
         }
-        
-        this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
     }
 } 

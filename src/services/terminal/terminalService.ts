@@ -2,12 +2,24 @@ import * as vscode from 'vscode';
 import { ExtensionContext } from '../../models/context/extensionContext';
 import { LoggingService } from '../../utils/logging/loggingService';
 
+export interface TerminalCommand {
+    command: string;
+    description: string;
+    timestamp: number;
+    workingDirectory?: string;
+    status: 'success' | 'error' | 'pending';
+    output?: string;
+}
+
 export class TerminalService implements vscode.Disposable {
     private static instance: TerminalService | undefined;
     private context: ExtensionContext;
     private terminal: vscode.Terminal | undefined;
     private loggingService: LoggingService | undefined;
+    private commandHistory: TerminalCommand[] = [];
+    private static readonly MAX_HISTORY_SIZE = 100;
     private disposables: vscode.Disposable[] = [];
+    private subscriptions: vscode.Disposable[] = [];
 
     constructor(context: ExtensionContext) {
         this.context = context;
@@ -19,112 +31,125 @@ export class TerminalService implements vscode.Disposable {
         return TerminalService.instance;
     }
 
-    public async executeCommand(command: string): Promise<void> {
-        try {
-            this.loggingService?.debug(`Executing command: ${command}`);
-            
-            // Require user confirmation before executing commands
-            if (this.context.configurationService.isRequireConfirmation()) {
-                const confirmed = await vscode.window.showWarningMessage(
-                    `Do you want to execute: ${command}`,
-                    { modal: true },
-                    'Execute'
-                );
-                
-                if (confirmed !== 'Execute') {
-                    this.loggingService?.info('Command execution cancelled by user');
-                    return;
-                }
-            }
-            
-            const terminal = await this.getTerminal();
-            terminal.show();
-            terminal.sendText(command);
-            
-            this.context.telemetryService.trackEvent('terminal_command_executed', {
-                commandLength: command.length.toString()
-            });
-        } catch (error) {
-            this.loggingService?.error('Failed to execute command', error);
-            throw new Error(`Command execution failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    public async executeCommandWithResult(command: string): Promise<string> {
-        // For commands where we need to capture the output, we'll use the exec utility from child_process
-        // But in VS Code extension, we should use the VS Code API when possible
+    public async initialize(): Promise<void> {
+        this.loggingService?.info('Initializing terminal service');
         
-        try {
-            this.loggingService?.debug(`Executing command with result: ${command}`);
-            
-            // Require user confirmation
-            if (this.context.configurationService.isRequireConfirmation()) {
-                const confirmed = await vscode.window.showWarningMessage(
-                    `Do you want to execute: ${command}`,
-                    { modal: true },
-                    'Execute'
-                );
-                
-                if (confirmed !== 'Execute') {
-                    this.loggingService?.info('Command execution cancelled by user');
-                    return 'Command execution cancelled by user';
-                }
+        // Load command history from workspace state
+        this.loadCommandHistory();
+        
+        // Listen for terminal close events
+        const terminalCloseListener = vscode.window.onDidCloseTerminal(terminal => {
+            if (terminal === this.terminal) {
+                this.terminal = undefined;
+                this.loggingService?.debug('Terminal closed');
             }
-            
-            // For commands where we need output, we use VS Code's built-in task API
-            const taskExecution = await vscode.tasks.executeTask(
-                new vscode.Task(
-                    { type: 'm31-agent' },
-                    vscode.TaskScope.Workspace,
-                    'Execute Command',
-                    'm31-agent',
-                    new vscode.ShellExecution(command)
-                )
-            );
-            
-            // Return a promise that resolves when the task completes
-            return new Promise<string>((resolve, reject) => {
-                const disposable = vscode.tasks.onDidEndTaskProcess(e => {
-                    if (e.execution === taskExecution) {
-                        disposable.dispose();
-                        
-                        if (e.exitCode === 0) {
-                            // Unfortunately, VS Code doesn't provide direct access to command output
-                            // We'd need to parse it from the terminal or use Node's child_process
-                            // For simplicity, we'll just return a success message
-                            resolve(`Command executed successfully with exit code 0`);
-                        } else {
-                            reject(new Error(`Command failed with exit code ${e.exitCode}`));
-                        }
-                    }
-                });
-                
-                // Add to disposables to ensure cleanup
-                this.disposables.push(disposable);
-            });
-        } catch (error) {
-            this.loggingService?.error('Failed to execute command with result', error);
-            throw new Error(`Command execution failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        });
+        
+        this.subscriptions.push(terminalCloseListener);
+        
+        this.loggingService?.info('Terminal service initialized');
     }
 
-    private async getTerminal(): Promise<vscode.Terminal> {
-        // Create a new terminal if it doesn't exist or was closed
+    public async executeCommand(command: string, description: string = ''): Promise<void> {
+        await this.ensureTerminalExists();
+
         if (!this.terminal) {
-            this.terminal = vscode.window.createTerminal('M31 Agent');
-            
-            // Register dispose handler
-            const onDidCloseTerminalDisposable = vscode.window.onDidCloseTerminal(closedTerminal => {
-                if (closedTerminal === this.terminal) {
-                    this.terminal = undefined;
-                }
-            });
-            
-            this.disposables.push(onDidCloseTerminalDisposable);
-            this.loggingService?.debug('Created new terminal for M31 Agent');
+            throw new Error('Failed to create terminal');
         }
+
+        // Show the terminal
+        this.terminal.show();
+
+        // Record command in history
+        const terminalCommand: TerminalCommand = {
+            command,
+            description: description || command,
+            timestamp: Date.now(),
+            workingDirectory: await this.getCurrentWorkingDirectory(),
+            status: 'pending'
+        };
+
+        this.commandHistory.unshift(terminalCommand);
+        this.trimCommandHistory();
+        this.saveCommandHistory();
+
+        // Execute the command
+        this.terminal.sendText(command);
+        
+        // Track telemetry
+        this.context.telemetryService.trackEvent('terminal_command_executed', {
+            commandLength: command.length.toString()
+        });
+    }
+
+    public async createTerminal(name: string = 'M31 Agent'): Promise<vscode.Terminal> {
+        // Close existing terminal if it exists
+        if (this.terminal) {
+            this.terminal.dispose();
+        }
+
+        // Create a new terminal
+        this.terminal = vscode.window.createTerminal(name);
+        
+        // Track telemetry
+        this.context.telemetryService.trackEvent('terminal_created', {
+            name
+        });
         
         return this.terminal;
+    }
+
+    private async ensureTerminalExists(): Promise<void> {
+        if (!this.terminal) {
+            this.terminal = await this.createTerminal();
+        }
+    }
+
+    private async getCurrentWorkingDirectory(): Promise<string | undefined> {
+        try {
+            // This is difficult to get reliably, so we'll return undefined for now
+            // In a real implementation, we might execute a command like 'pwd' and capture the output
+            return undefined;
+        } catch (error) {
+            this.loggingService?.error('Failed to get current working directory', error);
+            return undefined;
+        }
+    }
+
+    public getCommandHistory(): TerminalCommand[] {
+        return [...this.commandHistory];
+    }
+
+    private trimCommandHistory(): void {
+        if (this.commandHistory.length > TerminalService.MAX_HISTORY_SIZE) {
+            this.commandHistory = this.commandHistory.slice(0, TerminalService.MAX_HISTORY_SIZE);
+        }
+    }
+
+    private loadCommandHistory(): void {
+        try {
+            const storedHistory = this.context.workspaceState.get<TerminalCommand[]>('m31-agent.terminalCommandHistory');
+            if (storedHistory) {
+                this.commandHistory = storedHistory;
+                this.loggingService?.debug(`Loaded ${storedHistory.length} terminal commands from history`);
+            }
+        } catch (error) {
+            this.loggingService?.error('Failed to load terminal command history', error);
+        }
+    }
+
+    private saveCommandHistory(): void {
+        try {
+            this.context.workspaceState.update('m31-agent.terminalCommandHistory', this.commandHistory);
+        } catch (error) {
+            this.loggingService?.error('Failed to save terminal command history', error);
+        }
+    }
+
+    public async clearCommandHistory(): Promise<void> {
+        this.commandHistory = [];
+        await this.saveCommandHistory();
+        this.loggingService?.debug('Terminal command history cleared');
     }
 
     public dispose(): void {
@@ -135,5 +160,8 @@ export class TerminalService implements vscode.Disposable {
             this.terminal.dispose();
             this.terminal = undefined;
         }
+        
+        this.subscriptions.forEach(s => s.dispose());
+        this.subscriptions = [];
     }
 }
